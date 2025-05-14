@@ -6,7 +6,21 @@ from os.path import expanduser
 
 
 class SpainZones:
-    def __init__(self, zones: str = None, version: int = 1, output_directory: str = None, return_df: bool = True):
+    def __init__(self, zones: str = None, version: int = 1, output_directory: str = None):
+        """
+        Class to handle the zoning related to the Spanish big mobility data. The class is used to download the data and
+        process it. Selectable granularities are districts (distritos), municipalities (municipios) and large urban areas (grandes áreas urbanas). As a reminder,
+        mobility data for the COVID-19 period (version 1) are not available for the large urban areas.
+
+        Parameters
+        ----------
+        zones : str
+            The zones to download the data for. Default is municipalities. Zones must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas
+        version : int
+            The version of the data to download. Default is 2. Version must be 1 or 2. Version 1 contains the data from 2020 to 2021. Version 2 contains the data from 2022 onwards.
+        output_directory : str
+            The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
+        """
 
         utils.version_assert(version)
         utils.zone_assert(zones, version)
@@ -24,7 +38,7 @@ class SpainZones:
             file_name = link.split('/')[-1]
 
             # Check if the file exists in the data directory
-            local_path = data_directory + file_name
+            local_path = data_directory +'/'+ file_name
 
             if not os.path.exists(local_path):
                 # Download the file
@@ -47,8 +61,6 @@ class SpainZones:
         if os.path.exists(output_path):
             print(f"File {output_path} already exists. Loading it...")
             complete_df = gpd.read_file(output_path)
-            if return_df:
-                return complete_df
 
         if version == 2:
             nombre = gpd.read_file(os.path.join(utils.get_data_directory(), f'nombres_{zones}.csv'))
@@ -64,15 +76,15 @@ class SpainZones:
                 'municipios': 'municipalities_mitma',
                 'distritos': 'districts_mitma'
             }
-
-            relacion.rename(columns={
+            remapping = {
                 'seccion_ine': 'census_sections',
                 'distrito_ine': 'census_districts',
                 'municipio_ine': 'municipalities',
                 'municipio_mitma': 'municipalities_mitma',
                 'distrito_mitma': 'districts_mitma',
                 'gau_mitma': 'luas_mitma'
-            }, inplace=True)
+            }
+            relacion.rename(columns=remapping, inplace=True)
             relacion = relacion.replace('NA', None)
 
             for cname in list(relacion.columns):
@@ -84,7 +96,7 @@ class SpainZones:
 
             complete_df.reset_index(inplace=True)
             complete_df.rename(columns={'ID': 'id'}, inplace=True)
-            complete_df.set_index(zones, inplace=True)
+            complete_df.set_index('id', inplace=True)
 
             if output_directory is not None:
                 complete_df.to_file(os.path.join(output_directory, f'{zones}_{version}.geojson'), driver="GeoJSON")
@@ -127,8 +139,11 @@ class SpainZones:
             complete_df = gpd.GeoDataFrame(complete_df)
             complete_df.to_file(os.path.join(output_directory, f'{zones}_{version}.geojson'), driver="GeoJSON")
 
-        if return_df:
-            # remove the geometry column from the dataframe
-            return complete_df
-        else:
-            return None
+        self.complete_df = complete_df
+
+    def get_zone_geodataframe(self):
+        """
+        Use this method to get the geodataframe with the zones. The geodataframe contains the following columns:
+
+        """
+        return self.complete_df
