@@ -5,8 +5,10 @@ import xml.etree.ElementTree as ET
 import re
 from urllib.request import urlopen
 import zipfile
+from os.path import expanduser
 
-data_directory = "../data/"
+
+data_directory = os.path.join(expanduser("~"), 'data')
 
 def available_mobility_data(version: int = 2) -> pd.DataFrame:
     version_assert(version)
@@ -108,6 +110,9 @@ def version_assert(version: int = None) -> None:
 def mobility_assert(mobility_type: str = None) -> None:
     assert mobility_type in ["od", "origin-destination", "os", "overnight_stays", "nt", "number_of_trips"], "mobility_type must be one of the following: od, origin-destination, os, overnight_stays, nt, number_of_trips"
 
+def date_format_assert(date: str = None) -> None:
+    assert bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date)), "date must be in the format YYYY-MM-DD"
+
 def zone_normalization(zone: str = None) -> str:
     mapping = {
         'districts': 'distritos',
@@ -175,7 +180,6 @@ def download_file_if_not_existing(url: str, local_path: str) -> None:
     if not os.path.exists(local_path):
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with urlopen(url) as f:
-            print('Downloading file from', url)
             with open(local_path, 'wb') as out_file:
                 out_file.write(f.read())
                 print('Saved to', local_path)
