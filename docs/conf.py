@@ -5,10 +5,12 @@
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'pyspainmobility'))
-print('HELLO', str(Path(__file__).resolve().parents[1]/'pyspainmobility'))
-# -- Project information -----------------------------------------------------
-# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
+import os
+
+sys.path.insert(0, os.path.abspath("../pyspainmobility"))
+sys.path.insert(0, os.path.abspath(".."))
+
+print(sys.path)
 
 project = 'pySpainMobility'
 copyright = '2025, Massimiliano Luca'
@@ -23,7 +25,12 @@ extensions = [
     'sphinx.ext.doctest',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
+    "sphinx.ext.napoleon",
 ]
+
+napoleon_google_docstring = False
+napoleon_use_param = False
+napoleon_use_ivar = True
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
@@ -34,4 +41,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'furo'
+
+numpydoc_show_class_members = False
+
 html_static_path = ['_static']

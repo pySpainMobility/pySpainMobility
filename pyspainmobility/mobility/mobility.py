@@ -29,7 +29,7 @@ class SpainMobility:
         The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
     Examples
     --------
-    >>> from pyspainmobility.mobility.mobility import SpainMobility
+    >>> from pyspainmobility import SpainMobility
     >>> # instantiate the object
     >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
     >>> # download and save the origin-destination data
@@ -89,7 +89,7 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility.mobility.mobility import SpainMobility
+        >>> from pyspainmobility import SpainMobility
         >>> # instantiate the object
         >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the origin-destination data
@@ -177,7 +177,7 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility.mobility.mobility import SpainMobility
+        >>> from pyspainmobility import SpainMobility
         >>> # instantiate the object
         >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the overnight stays data and return the dataframe
@@ -228,7 +228,7 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility.mobility.mobility import SpainMobility
+        >>> from pyspainmobility import SpainMobility
         >>> # instantiate the object
         >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the overnight stays data and return the dataframe

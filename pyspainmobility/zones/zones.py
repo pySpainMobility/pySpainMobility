@@ -2,8 +2,7 @@ from pyspainmobility.utils import utils
 import pandas as pd
 import geopandas as gpd
 import os
-from os.path import expanduser
-
+import matplotlib
 
 class SpainZones:
     def __init__(self, zones: str = None, version: int = 1, output_directory: str = None):
@@ -20,18 +19,35 @@ class SpainZones:
             The version of the data to download. Default is 2. Version must be 1 or 2. Version 1 contains the data from 2020 to 2021. Version 2 contains the data from 2022 onwards.
         output_directory : str
             The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
+
+        Examples
+        --------
+
+        >>> from pyspainmobility import SpainZones
+        >>> # instantiate the object
+        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> # get the geodataframe with the zones
+        >>> gdf = zones.get_zone_geodataframe()
+        >>> print(gdf.head())
+                                                       name            population
+        ID
+        01001                                        Alegría-Dulantzi     2925.0
+        01002                                                 Amurrio    10307.0
+        01004_AM                  Artziniega agregacion de municipios     3005.0
+        01009_AM                   Asparrena agregacion de municipios     4599.0
+
         """
 
         utils.version_assert(version)
         utils.zone_assert(zones, version)
-
+        self.version = version
         zones = utils.zone_normalization(zones)
-
+        self.zones = zones
         links = utils.available_zoning_data(version, zones)['link'].unique().tolist()
 
         # Get the data directory
         data_directory = utils.get_data_directory()
-
+        self.data_directory = data_directory
         # for each link, check if the file exists in the data directory. If not, download it
         for link in links:
             # Get the file name
@@ -65,31 +81,10 @@ class SpainZones:
         if version == 2:
             nombre = gpd.read_file(os.path.join(utils.get_data_directory(), f'nombres_{zones}.csv'))
             pop = gpd.read_file(os.path.join(utils.get_data_directory(), f'poblacion_{zones}.csv'))
-            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), 'relacion_ine_zonificacionMitma.csv'))
             zonification = gpd.read_file(os.path.join(utils.get_data_directory(), f'zonificacion_{zones}.shp'))
 
             pop = pop.replace('NA', None)
             complete_df = nombre.set_index('ID').join(pop.set_index('field_1')).rename(columns={'field_2': 'population'})
-
-            excluded_column = {
-                'gaus': 'luas_mitma',
-                'municipios': 'municipalities_mitma',
-                'distritos': 'districts_mitma'
-            }
-            remapping = {
-                'seccion_ine': 'census_sections',
-                'distrito_ine': 'census_districts',
-                'municipio_ine': 'municipalities',
-                'municipio_mitma': 'municipalities_mitma',
-                'distrito_mitma': 'districts_mitma',
-                'gau_mitma': 'luas_mitma'
-            }
-            relacion.rename(columns=remapping, inplace=True)
-            relacion = relacion.replace('NA', None)
-
-            for cname in list(relacion.columns):
-                if cname != excluded_column[zones]:
-                    complete_df = complete_df.join(pd.DataFrame(relacion.groupby(excluded_column[zones])[cname].apply(set)))
 
             complete_df = complete_df.join(zonification.set_index('ID'))
             complete_df = gpd.GeoDataFrame(complete_df)
@@ -104,19 +99,90 @@ class SpainZones:
                 complete_df.to_file(os.path.join(data_directory, f'{zones}_{version}.geojson'), driver="GeoJSON")
 
         elif version == 1:
-            used_zone = zones[:-1]
-
-            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), f'relaciones_{used_zone}_mitma.csv'))
             zonification = gpd.read_file(os.path.join(utils.get_data_directory(), f'zonificacion-{zones}/{zones}_mitma.shp'))
+            zonification.to_file(os.path.join(output_directory, f'{zones}_{version}.geojson'), driver="GeoJSON")
+
+        self.complete_df = complete_df
+
+    def get_zone_geodataframe(self):
+        """
+        Function that returns the geodataframe with the zones. The geodataframe contains the following columns:
+        - id: the id of the zone
+        - name: the name of the zone
+        - population: the population of the zone (if available)
+
+        Parameters
+        ----------
+
+        Examples
+        --------
+
+        >>> from pyspainmobility import SpainZones
+        >>> # instantiate the object
+        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> # get the geodataframe with the zones
+        >>> gdf = zones.get_zone_geodataframe()
+        >>> print(gdf.head())
+                                                       name            population
+        ID
+        01001                                        Alegría-Dulantzi     2925.0
+        01002                                                 Amurrio    10307.0
+        01004_AM                  Artziniega agregacion de municipios     3005.0
+        01009_AM                   Asparrena agregacion de municipios     4599.0
+
+        """
+        return self.complete_df
+
+    def get_zone_relations(self):
+        """
+        TODO
+
+        Parameters
+        ----------
+
+        Examples
+        --------
+
+        >>> from pyspainmobility import SpainZones
+        >>> # instantiate the object
+        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> # get the geodataframe with the zones
+        >>> gdf = zones.get_zone_geodataframe()
+        >>> print(gdf.head())
+                                                       name            population
+        ID
+        01001                                        Alegría-Dulantzi     2925.0
+        01002                                                 Amurrio    10307.0
+        01004_AM                  Artziniega agregacion de municipios     3005.0
+        01009_AM                   Asparrena agregacion de municipios     4599.0
+
+        """
+        if self.version == 2:
+            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), 'relacion_ine_zonificacionMitma.csv'))
+
+            remapping = {
+                'seccion_ine': 'census_sections',
+                'distrito_ine': 'census_districts',
+                'municipio_ine': 'municipalities',
+                'municipio_mitma': 'municipalities_mitma',
+                'distrito_mitma': 'districts_mitma',
+                'gau_mitma': 'luas_mitma'
+            }
+            relacion.rename(columns=remapping, inplace=True)
+            relacion = relacion.replace('NA', None)
+            return relacion
+        else:
+            used_zone = self.zones[:-1]
+            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), f'relaciones_{used_zone}_mitma.csv'))
 
             relacion.rename(columns={f'{used_zone}_mitma': 'id'}, inplace=True)
 
             if used_zone == 'municipio':
-                temp = gpd.read_file(os.path.join(utils.get_data_directory(),'relaciones_distrito_mitma.csv'))
+                temp = gpd.read_file(os.path.join(utils.get_data_directory(), 'relaciones_distrito_mitma.csv'))
                 relacion = relacion.set_index('id').join(temp.set_index('municipio_mitma')).reset_index()
 
             if used_zone == 'distrito':
-                temp = gpd.read_file(os.path.join(utils.get_data_directory(),'relaciones_municipio_mitma.csv'))
+                temp = gpd.read_file(os.path.join(utils.get_data_directory(), 'relaciones_municipio_mitma.csv'))
                 relacion = relacion.set_index('municipio_mitma').join(temp.set_index('municipio_mitma')).reset_index()
 
             to_rename = {
@@ -133,17 +199,4 @@ class SpainZones:
                 if i != 'id':
                     temp_df = temp_df.join(relacion.groupby('id')[i].apply(set))
 
-            relacion = temp_df
-
-            complete_df = relacion.join(zonification.set_index('ID'))
-            complete_df = gpd.GeoDataFrame(complete_df)
-            complete_df.to_file(os.path.join(output_directory, f'{zones}_{version}.geojson'), driver="GeoJSON")
-
-        self.complete_df = complete_df
-
-    def get_zone_geodataframe(self):
-        """
-        Use this method to get the geodataframe with the zones. The geodataframe contains the following columns:
-
-        """
-        return self.complete_df
+            return temp_df

@@ -6,14 +6,13 @@
 pySpainMobility documentation
 =============================
 
-Add your content using ``reStructuredText`` syntax. See the
-`reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
-documentation for details.
-
+.. warning::
+  scikit-mobility is an ongoing open-source project created by the research community. The library is in its first BETA release, as well as the documentation. In the case you find errors, or you simply have suggestions, please open an issue in the repository. We would love to hear from you!
 
 .. toctree::
+   :caption: API Reference
+   :maxdepth: 2
 
-   usage
+   reference/mobility
+   reference/zones
 
-
-Check out the :doc:`usage` section for further information.
