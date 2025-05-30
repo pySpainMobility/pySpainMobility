@@ -6,7 +6,7 @@ import pandas as pd
 import tqdm
 from os.path import expanduser
 
-class SpainMobility:
+class Mobility:
     """
     This is the object taking care of the data download and preprocessing of (i) daily origin-destination matrices (ii), overnight stays and (iii) number of trips.
     The data is downloaded from the Spanish Ministry of Transport, Mobility and Urban Agenda (MITMA) Open Data portal.
@@ -29,9 +29,9 @@ class SpainMobility:
         The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
     Examples
     --------
-    >>> from pyspainmobility import SpainMobility
+    >>> from pyspainmobility import Mobility
     >>> # instantiate the object
-    >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
+    >>> mobility_data = Mobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
     >>> # download and save the origin-destination data
     >>> mobility_data.get_od_data(keep_activity=True)
     >>> # download and save the overnight stays data
@@ -89,9 +89,9 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainMobility
+        >>> from pyspainmobility import Mobility
         >>> # instantiate the object
-        >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
+        >>> mobility_data = Mobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the origin-destination data
         >>> mobility_data.get_od_data(keep_activity=True)
         >>> # download and save the od data and return the dataframe
@@ -177,9 +177,9 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainMobility
+        >>> from pyspainmobility import Mobility
         >>> # instantiate the object
-        >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
+        >>> mobility_data = Mobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the overnight stays data and return the dataframe
         >>> df = mobility_data.get_overnight_stays_data( return_df=True)
         >>> print(df.head())
@@ -228,9 +228,9 @@ class SpainMobility:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainMobility
+        >>> from pyspainmobility import Mobility
         >>> # instantiate the object
-        >>> mobility_data = SpainMobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
+        >>> mobility_data = Mobility(version=2, zones='municipalities', start_date='2022-01-01', end_date='2022-01-06', output_directory='/Desktop/spain/data/')
         >>> # download and save the overnight stays data and return the dataframe
         >>> df = mobility_data.get_number_of_trips_data( return_df=True)
         >>> print(df.head())

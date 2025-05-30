@@ -1,12 +1,7 @@
-===================
 Zones
-===================
-.. currentmodule:: pyspainmobility.zones
+=====
 
-.. autosummary::
-
-	get_zone_geodataframe
-    get_zone_relations
-
-.. automodule:: pyspainmobility.zones.zones
-	:members: SpainZones, get_zone_geodataframe, get_zone_relations
+.. autoclass:: pyspainmobility.zones.zones.Zones
+   :members:
+   :undoc-members:
+   :inherited-members:

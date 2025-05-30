@@ -4,7 +4,7 @@ import geopandas as gpd
 import os
 import matplotlib
 
-class SpainZones:
+class Zones:
     def __init__(self, zones: str = None, version: int = 1, output_directory: str = None):
         """
         Class to handle the zoning related to the Spanish big mobility data. The class is used to download the data and
@@ -23,9 +23,9 @@ class SpainZones:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainZones
+        >>> from pyspainmobility import Zones
         >>> # instantiate the object
-        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> zones = Zones(zones='municipalities', version=2, output_directory='data')
         >>> # get the geodataframe with the zones
         >>> gdf = zones.get_zone_geodataframe()
         >>> print(gdf.head())
@@ -117,9 +117,9 @@ class SpainZones:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainZones
+        >>> from pyspainmobility import Zones
         >>> # instantiate the object
-        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> zones = Zones(zones='municipalities', version=2, output_directory='data')
         >>> # get the geodataframe with the zones
         >>> gdf = zones.get_zone_geodataframe()
         >>> print(gdf.head())
@@ -143,9 +143,9 @@ class SpainZones:
         Examples
         --------
 
-        >>> from pyspainmobility import SpainZones
+        >>> from pyspainmobility import Zones
         >>> # instantiate the object
-        >>> zones = SpainZones(zones='municipalities', version=2, output_directory='data')
+        >>> zones = Zones(zones='municipalities', version=2, output_directory='data')
         >>> # get the geodataframe with the zones
         >>> gdf = zones.get_zone_geodataframe()
         >>> print(gdf.head())
