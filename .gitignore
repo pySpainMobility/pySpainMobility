@@ -18,6 +18,10 @@ __pycache__/
 # C extensions
 *.so
 
+
+# local test notebooks / scratch tests
+tests/
+
 # Distribution / packaging
 .Python
 build/
