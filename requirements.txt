@@ -2,3 +2,4 @@ pandas~=2.2.3
 geopandas~=1.0.1
 matplotlib>=3.0.0
 pyarrow>=8.0.0
+dask[dataframe] >=2024.0

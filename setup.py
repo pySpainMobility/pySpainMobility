@@ -27,6 +27,7 @@ setup(
         "tqdm>=4.0.0",
         "matplotlib>=3.0.0",
         "pyarrow>=8.0.0",
+        "dask[dataframe] >=2024.0"
 
     ],
     extras_require={

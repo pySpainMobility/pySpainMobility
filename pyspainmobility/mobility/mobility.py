@@ -1,10 +1,18 @@
 from typing import Any
-
+from pandas.errors import EmptyDataError 
 from pyspainmobility.utils import utils
 import os
 import pandas as pd
 import tqdm
 from os.path import expanduser
+
+# Optional Dask import – only used when caller sets use_dask=True
+try:
+    import dask.dataframe as dd
+    from dask import delayed
+except ImportError:  # pragma: no cover
+    dd = None
+    delayed = None
 
 class Mobility:
     """
@@ -27,6 +35,8 @@ class Mobility:
         The end date of the data to download. Default is None. Date must be in the format YYYY-MM-DD. if not specified, the end date will be the same as the start date.
     output_directory : str
         The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
+    use_dask : bool
+        Whether to use Dask for processing large datasets. Default is False. Requires dask to be installed.
     Examples
     --------
     >>> from pyspainmobility import Mobility
@@ -39,12 +49,16 @@ class Mobility:
     >>> # download and save the number of trips data
     >>> mobility_data.get_number_of_trips_data()
     """
-    def __init__(self, version: int = 2, zones: str = 'municipalities', start_date:str = None, end_date:str = None, output_directory:str = None):
+    def __init__(self, version: int = 2, zones: str = 'municipalities', start_date:str = None, end_date:str = None, output_directory:str = None, use_dask: bool = False):
         self.version = version
         self.zones = zones
         self.start_date = start_date
         self.end_date = end_date
         self.output_directory = output_directory
+        self.use_dask = use_dask
+
+        if self.use_dask and dd is None:
+            raise ImportError("Dask is not installed. Please install dask to use use_dask=True")
 
         utils.zone_assert(zones, version)
         utils.version_assert(version)
@@ -72,8 +86,77 @@ class Mobility:
             if self.zones == 'gaus':
                 self.zones = 'GAU'
 
+    def _process_single_od_file(self, filepath, keep_activity, social_agg):
+        """Extract common file processing logic"""
+        try:
+            df = pd.read_csv(filepath, sep="|")
+        except EmptyDataError:
+            print(f"[warn] {os.path.basename(filepath)} is empty, skipped")
+            return None
 
-    def get_od_data(self, keep_activity: bool = False, return_df: bool = False):
+        # --- rename ---
+        df.rename(
+            columns={
+                "fecha": "date",
+                "periodo": "hour",
+                "origen": "id_origin",
+                "destino": "id_destination",
+                "actividad_origen": "activity_origin",
+                "actividad_destino": "activity_destination",
+                "residencia": "residence_province_ine_code",
+                "distancia": "distance",
+                "viajes": "n_trips",
+                "viajes_km": "trips_total_length_km",
+                # socio-demo
+                "renta": "income",
+                "edad": "age",
+                "sexo": "gender",
+            },
+            inplace=True,
+        )
+
+        # --- tidy date ---
+        tmp = str(df.loc[0, "date"])
+        df["date"] = f"{tmp[:4]}-{tmp[4:6]}-{tmp[6:8]}"
+
+        # --- map activity / gender labels ---
+        df.replace(
+            {
+                "activity_origin": {
+                    "casa": "home",
+                    "frecuente": "other_frequent",
+                    "trabajo_estudio": "work_or_study",
+                    "no_frecuente": "other_non_frequent",
+                },
+                "activity_destination": {
+                    "casa": "home",
+                    "frecuente": "other_frequent",
+                    "trabajo_estudio": "work_or_study",
+                    "no_frecuente": "other_non_frequent",
+                },
+                "gender": {"hombre": "male", "mujer": "female"},
+            },
+            inplace=True,
+        )
+
+        # ------------------------------------------------------
+        # BUILD GROUP-BY KEY ACCORDING TO THE TWO FLAGS
+        # ------------------------------------------------------
+        group_cols = ["date", "hour", "id_origin", "id_destination"]
+        if keep_activity:
+            group_cols += ["activity_origin", "activity_destination"]
+        if social_agg:
+            group_cols += ["income", "age", "gender"]
+
+        df = (
+            df.groupby(group_cols)
+            .sum()[["n_trips", "trips_total_length_km"]]
+            .reset_index()
+        )
+
+        return df
+
+    def get_od_data(self, keep_activity: bool = False, return_df: bool = False,  social_agg: bool = False,):
         """
         Function to download and save the origin-destination data.
 
@@ -86,6 +169,14 @@ class Mobility:
 
         return_df : bool
             Default value is False. If True, the function will return the dataframe in addition to saving it to a file.
+
+        social_agg : bool
+            Default value is  False. Adds socio-demographic breakdown. 
+        • income:  <10 k, 10 to 15 k, >15 k € (in thousands)  
+        • age:  0 to 24, 25 to 44, 45 to 64, >65 yrs, NA  
+        • gender:  male, female, NA  
+
+        
         Examples
         --------
 
@@ -106,65 +197,72 @@ class Mobility:
         """
 
         if self.version == 2:
-            m_type = 'Viajes'
+            m_type = "Viajes"
             local_list = self._donwload_helper(m_type)
             temp_dfs = []
-            print('Generating parquet file for ODs....')
-            for f in tqdm.tqdm(local_list):
-                df = pd.read_csv(f, sep='|')
-
-                df.rename(columns={
-                    'fecha': 'date',
-                    'periodo': 'hour',
-                    'origen': 'id_origin',
-                    'destino': 'id_destination',
-                    'actividad_origen': 'activity_origin',
-                    'actividad_destino': 'activity_destination',
-                    'residencia': 'residence_province_ine_code',
-                    'distancia': 'distance',
-                    'viajes': 'n_trips',
-                    'viajes_km': 'trips_total_length_km'
-                }, inplace=True)
-
-                tmp_date = str(df.loc[0]['date'])
-                new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                df['date'] = new_date
-
-                df.replace({"activity_origin":
-                                {'casa': 'home',
-                                 'frecuente': 'other_frequent',
-                                 'trabajo_estudio': 'work_or_study',
-                                 'no_frecuente': 'other_non_frequent'}},
-                           inplace=True
-                           )
-
-                df.replace({"activity_destination":
-                                {'casa': 'home',
-                                 'frecuente': 'other_frequent',
-                                 'trabajo_estudio': 'work_or_study',
-                                 'no_frecuente': 'other_non_frequent'}},
-                           inplace=True
-                           )
-
-                if keep_activity:
-                    df = df.groupby(['date', 'hour', 'id_origin', 'id_destination', 'activity_origin',
-                                     'activity_destination']).sum()[
-                        ['n_trips', 'trips_total_length_km']]
-                else:
-                    df = df.groupby(['date', 'hour', 'id_origin', 'id_destination']).sum()[
-                        ['n_trips', 'trips_total_length_km']]
-                df = df.reset_index()
-                temp_dfs.append(df)
-            print('Concatenating all the dataframes....')
-            if len(temp_dfs) == 1:
-                df = temp_dfs[0]
+            print("Generating parquet file for ODs....")
+            
+            if self.use_dask:
+                # Use Dask for processing
+                return self._process_od_data_dask(local_list, m_type, keep_activity, social_agg, return_df)
             else:
-                df = pd.concat(temp_dfs)
-            self._saving_parquet(df, m_type)
+                # Original pandas processing using extracted method
+                for f in tqdm.tqdm(local_list):
+                    result = self._process_single_od_file(f, keep_activity, social_agg)
+                    if result is not None:
+                        temp_dfs.append(result)
 
-            if return_df:
-                return df
+                if not temp_dfs:
+                    print("No valid data found")
+                    return None
+
+                print("Concatenating all the dataframes....")
+                df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
+
+                self._saving_parquet(df, m_type)
+                return df if return_df else None
+
         return None
+
+    def _process_od_data_dask(self, local_list, m_type, keep_activity, social_agg, return_df):
+        """Process OD data using Dask for better performance with large datasets """
+        print("Processing with Dask...")
+        
+        if delayed is None:
+            raise ImportError("Dask delayed is not available")
+        
+        @delayed
+        def process_single_file(filepath):
+            return self._process_single_od_file(filepath, keep_activity, social_agg)
+        
+        # Create delayed tasks for each file
+        delayed_tasks = [process_single_file(f) for f in local_list]
+        
+        # Compute all delayed tasks
+        try:
+            processed_dfs = dd.compute(*delayed_tasks)
+        except Exception as e:
+            print(f"Dask computation failed: {e}")
+            print("Falling back to pandas processing...")
+            # Fallback using the same processing method
+            processed_dfs = []
+            for f in tqdm.tqdm(local_list):
+                result = self._process_single_od_file(f, keep_activity, social_agg)
+                if result is not None:
+                    processed_dfs.append(result)
+        
+        # Filter out None results and concatenate
+        valid_dfs = [df for df in processed_dfs if df is not None]
+        
+        if not valid_dfs:
+            print("No valid data found")
+            return None
+        
+        print("Concatenating results...")
+        df = pd.concat(valid_dfs, ignore_index=True)
+        
+        self._saving_parquet(df, m_type)
+        return df if return_df else None
 
     def get_overnight_stays_data(self, return_df: bool = False):
         """
@@ -195,26 +293,64 @@ class Mobility:
             local_list = self._donwload_helper(m_type)
             temp_dfs = []
             print('Generating parquet file for Overnight Stays....')
-            for f in tqdm.tqdm(local_list):
-                df = pd.read_csv(f, sep='|')
-                df.rename(columns={
-                    'fecha': 'date',
-                    'zona_residencia': 'residence_area',
-                    'zona_pernoctacion': 'overnight_stay_area',
-                    'personas': 'people'
-                }, inplace=True)
+            
+            if self.use_dask and len(local_list) > 1:
+                # Use Dask for larger datasets
+                @delayed
+                def process_overnight_file(filepath):
+                    try:
+                        df = pd.read_csv(filepath, sep='|')
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'zona_residencia': 'residence_area',
+                            'zona_pernoctacion': 'overnight_stay_area',
+                            'personas': 'people'
+                        }, inplace=True)
 
-                tmp_date = str(df.loc[0]['date'])
-                new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                df['date'] = new_date
+                        if len(df) > 0:
+                            tmp_date = str(df.iloc[0]['date'])
+                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
+                        return df
+                    except Exception as e:
+                        print(f"Error processing {filepath}: {e}")
+                        return None
+                
+                delayed_tasks = [process_overnight_file(f) for f in local_list]
+                processed_dfs = dd.compute(*delayed_tasks)
+                valid_dfs = [df for df in processed_dfs if df is not None]
+                
+                if valid_dfs:
+                    df = pd.concat(valid_dfs, ignore_index=True)
+                else:
+                    return None
+            else:
+                # Original pandas processing
+                for f in tqdm.tqdm(local_list):
+                    try:
+                        df = pd.read_csv(f, sep='|')
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'zona_residencia': 'residence_area',
+                            'zona_pernoctacion': 'overnight_stay_area',
+                            'personas': 'people'
+                        }, inplace=True)
 
-                temp_dfs.append(df)
+                        tmp_date = str(df.loc[0]['date'])
+                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
+                        df['date'] = new_date
 
-            print('Concatenating all the dataframes....')
-            df = pd.concat(temp_dfs)
-            self._saving_parquet(df, m_type)
-            if return_df:
-                return df
+                        temp_dfs.append(df)
+                    except Exception as e:
+                        print(f"Error processing file: {e}")
+                        continue
+
+                print('Concatenating all the dataframes....')
+                df = pd.concat(temp_dfs) if temp_dfs else None
+                
+            if df is not None:
+                self._saving_parquet(df, m_type)
+                if return_df:
+                    return df
         return None
 
     def get_number_of_trips_data(self, return_df: bool = False):
@@ -245,36 +381,82 @@ class Mobility:
             m_type = 'Personas'
             local_list = self._donwload_helper(m_type)
             temp_dfs = []
-            print('Generating parquet file for Overnight Stays....')
-            for f in tqdm.tqdm(local_list):
-                df = pd.read_csv(f, sep='|')
+            print('Generating parquet file for Number of Trips....')
+            
+            if self.use_dask and len(local_list) > 1:  # multiple files
+                # Use Dask for larger datasets
+                @delayed
+                def process_trips_file(filepath):
+                    try:
+                        df = pd.read_csv(filepath, sep='|')
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'zona_pernoctacion': 'overnight_stay_area',
+                            'edad': 'age',
+                            'sexo': 'gender',
+                            'numero_viajes': 'number_of_trips',
+                            'personas': 'people'
+                        }, inplace=True)
 
-                df.rename(columns={
-                    'fecha': 'date',
-                    'zona_pernoctacion': 'overnight_stay_area',
-                    'edad': 'age',
-                    'sexo': 'gender',
-                    'numero_viajes': 'number_of_trips',
-                    'personas': 'people'
-                }, inplace=True)
+                        df.replace({"gender":
+                                        {'hombre': 'male',
+                                         'mujer': 'female'}},
+                                   inplace=True
+                                   )
 
-                df.replace({"gender":
-                                {'hombre': 'male',
-                                 'mujer': 'female'}},
-                           inplace=True
-                           )
+                        if len(df) > 0:
+                            tmp_date = str(df.iloc[0]['date'])
+                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
+                        return df
+                    except Exception as e:
+                        print(f"Error processing {filepath}: {e}")
+                        return None
+                
+                delayed_tasks = [process_trips_file(f) for f in local_list]
+                processed_dfs = dd.compute(*delayed_tasks)
+                valid_dfs = [df for df in processed_dfs if df is not None]
+                
+                if valid_dfs:
+                    df = pd.concat(valid_dfs, ignore_index=True)
+                else:
+                    return None
+            else:
+                # Original pandas processing
+                for f in tqdm.tqdm(local_list):
+                    try:
+                        df = pd.read_csv(f, sep='|')
 
-                tmp_date = str(df.loc[0]['date'])
-                new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                df['date'] = new_date
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'zona_pernoctacion': 'overnight_stay_area',
+                            'edad': 'age',
+                            'sexo': 'gender',
+                            'numero_viajes': 'number_of_trips',
+                            'personas': 'people'
+                        }, inplace=True)
 
-                temp_dfs.append(df)
+                        df.replace({"gender":
+                                        {'hombre': 'male',
+                                         'mujer': 'female'}},
+                                   inplace=True
+                                   )
 
-            print('Concatenating all the dataframes....')
-            df = pd.concat(temp_dfs)
-            self._saving_parquet(df, m_type)
-            if return_df:
-                return df
+                        tmp_date = str(df.loc[0]['date'])
+                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
+                        df['date'] = new_date
+
+                        temp_dfs.append(df)
+                    except Exception as e:
+                        print(f"Error processing file: {e}")
+                        continue
+
+                print('Concatenating all the dataframes....')
+                df = pd.concat(temp_dfs) if temp_dfs else None
+
+            if df is not None:
+                self._saving_parquet(df, m_type)
+                if return_df:
+                    return df
 
         return None
 
