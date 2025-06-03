@@ -10,7 +10,7 @@ from os.path import expanduser
 try:
     import dask.dataframe as dd
     from dask import delayed
-except ImportError:  # pragma: no cover
+except ImportError:  
     dd = None
     delayed = None
 
@@ -75,26 +75,77 @@ class Mobility:
 
         self.dates = utils.get_dates_between(start_date, end_date)
 
-        # check if a previously processed file exists in the output directory
+        # proper directory handling
         if output_directory is not None:
-            home = expanduser("~")
-            self.output_path = os.path.join(home,output_directory)
+            # Always treat as relative to home directory unless it's a proper absolute system path
+            if os.path.isabs(output_directory) and os.path.exists(os.path.dirname(output_directory)):
+                # It's a valid absolute path
+                self.output_path = output_directory
+            else:
+                # Treat as relative to home directory, strip leading slash if present
+                home = expanduser("~")
+                clean_path = output_directory.lstrip('/')
+                self.output_path = os.path.join(home, clean_path)
         else:
-            self.output_path = os.path.join(data_directory)
+            self.output_path = data_directory
+        
+        #Ensure directory exists
+        try:
+            os.makedirs(self.output_path, exist_ok=True)
+        except PermissionError as e:
+            raise PermissionError(f"Cannot create directory {self.output_path}. Please check permissions or use a different path. Error: {e}")
+        except Exception as e:
+            raise Exception(f"Error creating directory {self.output_path}: {e}")
 
         if self.version == 2:
             if self.zones == 'gaus':
                 self.zones = 'GAU'
 
     def _process_single_od_file(self, filepath, keep_activity, social_agg):
-        """Extract common file processing logic"""
+        """Extract common file processing logic - DEBUGGING VERSION"""
+        import gzip
+        
+        print(f"Processing file: {filepath}")
+        
+        # Check if file exists and get size
+        if not os.path.exists(filepath):
+            print(f"[ERROR] File does not exist: {filepath}")
+            return None
+        
+        file_size = os.path.getsize(filepath)
+        #print(f"File size: {file_size} bytes")
+        
+        if file_size == 0:
+            print(f"[warn] {os.path.basename(filepath)} is actually empty (0 bytes), skipped")
+            return None
+        
         try:
-            df = pd.read_csv(filepath, sep="|")
+            # Check if it's a gzipped file and handle accordingly
+            if filepath.endswith('.gz'):
+                print("Reading gzipped file...")
+                    
+                # Now read with pandas
+                df = pd.read_csv(filepath, sep="|", compression='gzip',   dtype={"origen": "string", "destino": "string"})
+            else:
+                print("Reading regular CSV file...")
+                df = pd.read_csv(filepath, sep="|",   dtype={"origen": "string", "destino": "string"})
+            #Debug prints
+              
+            #print(f"DataFrame shape after reading: {df.shape}")   
+            #print(f"DataFrame columns: {list(df.columns)}")
+            
+            if len(df) == 0:
+                print(f"[warn] {os.path.basename(filepath)} contains no data rows, skipped")
+                return None
+                
         except EmptyDataError:
-            print(f"[warn] {os.path.basename(filepath)} is empty, skipped")
+            print(f"[warn] {os.path.basename(filepath)} triggered EmptyDataError, skipped")
+            return None
+        except Exception as e:
+            print(f"[ERROR] Error reading {filepath}: {e}")
             return None
 
-        # --- rename ---
+        
         df.rename(
             columns={
                 "fecha": "date",
@@ -119,7 +170,7 @@ class Mobility:
         tmp = str(df.loc[0, "date"])
         df["date"] = f"{tmp[:4]}-{tmp[4:6]}-{tmp[6:8]}"
 
-        # --- map activity / gender labels ---
+        #  map activity / gender labels
         df.replace(
             {
                 "activity_origin": {
@@ -153,7 +204,7 @@ class Mobility:
             .sum()[["n_trips", "trips_total_length_km"]]
             .reset_index()
         )
-
+        
         return df
 
     def get_od_data(self, keep_activity: bool = False, return_df: bool = False,  social_agg: bool = False,):

@@ -6,6 +6,7 @@ import re
 from urllib.request import urlopen
 import zipfile
 from os.path import expanduser
+from urllib.request import urlopen, Request      
 
 
 data_directory = os.path.join(expanduser("~"), 'data')
@@ -173,16 +174,44 @@ def get_valid_dates(version: int = 2) -> list:
     df.dropna(subset = ['data_ymd'], inplace=True)
     return df['data_ymd'].unique().tolist()
 
+
+
 def download_file_if_not_existing(url: str, local_path: str) -> None:
     """
-    Download the file from the url and save it to the local path.
+    Download *url* to *local_path* unless the file already exists **and**
+    is non-empty.  Zero-byte (or corrupted) files are deleted and fetched
+    again.
     """
-    if not os.path.exists(local_path):
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with urlopen(url) as f:
-            with open(local_path, 'wb') as out_file:
-                out_file.write(f.read())
-                print('Saved to', local_path)
+    # If a previous run left an empty file, wipe it 
+    if os.path.exists(local_path) and os.path.getsize(local_path) == 0:
+        print(f"Found empty file at {local_path} – redownloading.")
+        os.remove(local_path)
+
+    # Normal early-exit when the file is OK
+    if os.path.exists(local_path):
+        return
+
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    try:
+        print(f"Downloading: {url}")
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})   # header
+        with urlopen(req) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP {resp.status}")
+            data = resp.read()
+            if not data:
+                raise Exception("Downloaded file is empty")
+
+        with open(local_path, "wb") as fh:
+            fh.write(data)
+        print(f"Saved {len(data)} bytes to {local_path}")
+
+    except Exception as e:
+        # Clean up partial artefacts
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        raise
 
 def get_dates_between(start_date: str, end_date: str) -> list:
     """
