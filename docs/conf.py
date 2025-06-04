@@ -76,17 +76,17 @@ language = 'en'
 #html_static_path = ['_static']
 
 # Theme options are theme-specific 
-html_theme_options = {
-    "sidebar_hide_name": False,
-    "light_css_variables": {
-        "color-brand-primary": "#2E86AB",
-        "color-brand-content": "#2E86AB",
-    },
-    "dark_css_variables": {
-        "color-brand-primary": "#A23B72",
-        "color-brand-content": "#A23B72",
-    },
-}
+# html_theme_options = {
+#     "sidebar_hide_name": False,
+#     "light_css_variables": {
+#         "color-brand-primary": "#2E86AB",
+#         "color-brand-content": "#2E86AB",
+#     },
+#     "dark_css_variables": {
+#         "color-brand-primary": "#A23B72",
+#         "color-brand-content": "#A23B72",
+#     },
+# }
 
 
 html_favicon = None 
