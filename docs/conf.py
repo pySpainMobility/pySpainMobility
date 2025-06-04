@@ -10,7 +10,7 @@ from pathlib import Path
 # -- Path setup --------------------------------------------------------------
 
 sys.path.insert(0, os.path.abspath(".."))
-sys.path.insert(0, os.path.abspath("../pyspainmobility"))
+#sys.path.insert(0, os.path.abspath("../pyspainmobility"))
 
 # -- Project information -----------------------------------------------------
 project = 'pySpainMobility'
