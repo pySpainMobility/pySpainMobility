@@ -7,7 +7,7 @@ pySpainMobility documentation
 =============================
 
 .. warning::
-  scikit-mobility is an ongoing open-source project created by the research community. The library is in its first BETA release, as well as the documentation. In the case you find errors, or you simply have suggestions, please open an issue in the repository. We would love to hear from you!
+   todo
 
 .. toctree::
    :caption: API Reference
