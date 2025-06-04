@@ -72,8 +72,8 @@ master_doc = 'index'
 language = 'en'
 
 # --HTML output -------------------------------------------------
-html_theme = "sphinx_rtd_theme"
-html_logo = "../logo_skmob.png"
+html_theme = "furo"
+html_logo = "../logo.jpeg"
 html_theme_options = {
     "canonical_url": "",
     "analytics_id": "UA-XXXXXXX-1",
