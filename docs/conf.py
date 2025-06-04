@@ -73,7 +73,7 @@ language = 'en'
 
 # --HTML output -------------------------------------------------
 html_theme = "furo"
-html_logo = "../logo.jpeg"
+html_logo = "../logo.png"
 html_theme_options = {
     "canonical_url": "",
     "analytics_id": "UA-XXXXXXX-1",
