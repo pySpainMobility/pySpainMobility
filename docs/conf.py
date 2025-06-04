@@ -14,8 +14,7 @@ sys.path.insert(0, os.path.abspath("../pyspainmobility"))
 
 # -- Project information -----------------------------------------------------
 project = 'pySpainMobility'
-copyright = '2025, Massimiliano Luca'
-author = 'Massimiliano Luca'
+author = 'Ciro Beneduce, Tania Gullón Muñoz-Repiso, Bruno Lepri, Massimiliano Luca'
 release = '0.1.0'
 version = '0.1.0'
 
@@ -72,21 +71,21 @@ master_doc = 'index'
 language = 'en'
 
 # --HTML output -------------------------------------------------
-#html_theme = 'furo'
-#html_static_path = ['_static']
+html_theme = 'furo'
+html_static_path = ['_static']
 
-# Theme options are theme-specific 
-# html_theme_options = {
-#     "sidebar_hide_name": False,
-#     "light_css_variables": {
-#         "color-brand-primary": "#2E86AB",
-#         "color-brand-content": "#2E86AB",
-#     },
-#     "dark_css_variables": {
-#         "color-brand-primary": "#A23B72",
-#         "color-brand-content": "#A23B72",
-#     },
-# }
+Theme options are theme-specific 
+html_theme_options = {
+    "sidebar_hide_name": False,
+    "light_css_variables": {
+        "color-brand-primary": "#2E86AB",
+        "color-brand-content": "#2E86AB",
+    },
+    "dark_css_variables": {
+        "color-brand-primary": "#A23B72",
+        "color-brand-content": "#A23B72",
+    },
+}
 
 
 html_favicon = None 
