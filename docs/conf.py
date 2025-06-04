@@ -72,7 +72,7 @@ master_doc = 'index'
 language = 'en'
 
 # --HTML output -------------------------------------------------
-html_theme = 'furo'
+#html_theme = 'furo'
 #html_static_path = ['_static']
 
 # Theme options are theme-specific 
