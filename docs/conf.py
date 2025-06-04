@@ -72,22 +72,28 @@ master_doc = 'index'
 language = 'en'
 
 # --HTML output -------------------------------------------------
-html_theme = 'furo'
-html_static_path = ['_static']
-
-Theme options are theme-specific 
+html_theme = "sphinx_rtd_theme"
+html_logo = "../logo_skmob.png"
 html_theme_options = {
-    "sidebar_hide_name": False,
-    "light_css_variables": {
-        "color-brand-primary": "#2E86AB",
-        "color-brand-content": "#2E86AB",
-    },
-    "dark_css_variables": {
-        "color-brand-primary": "#A23B72",
-        "color-brand-content": "#A23B72",
-    },
+    "canonical_url": "",
+    "analytics_id": "UA-XXXXXXX-1",
+    "logo_only": False,
+    "display_version": True,
+    "prev_next_buttons_location": "bottom",
+    "style_external_links": False,
+    "vcs_pageview_mode": "",
+    "style_nav_header_background": "white",
+    # Toc options
+    "collapse_navigation": True,
+    "sticky_navigation": True,
+    "navigation_depth": 4,
+    "includehidden": True,
+    "titles_only": False,
 }
 
+html_theme_path = [
+    "_themes",
+]
 
 html_favicon = None 
 
