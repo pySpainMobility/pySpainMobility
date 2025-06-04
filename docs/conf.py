@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath("../pyspainmobility"))
 
 # -- Project information -----------------------------------------------------
 project = 'pySpainMobility'
+copyright = ''
 author = 'Ciro Beneduce, Tania Gullón Muñoz-Repiso, Bruno Lepri, Massimiliano Luca'
 release = '0.1.0'
 version = '0.1.0'
