@@ -10,19 +10,18 @@ except FileNotFoundError:
 
 setup(
     name="pyspainmobility",
-    version="1.0.0",
+    version="1.0.1",
     author="Massimiliano Luca",
     author_email="mluca@fbk.eu",
     description="Tools for downloading and processing Spanish mobility data from MITMA",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/ssai-trento/pySpainMobility",
+    url="https://github.com/pySpainMobility/pySpainMobility",
     license="MIT",
     package_dir={"": "."},
     packages=find_packages(include=["pyspainmobility", "pyspainmobility.*"]),
-    python_requires=">=3.7",
+    python_requires=">=3.9",
     install_requires=[
-        "pandas~=2.2.3",
         "geopandas~=1.0.1",
         "tqdm>=4.0.0",
         "matplotlib>=3.0.0",
