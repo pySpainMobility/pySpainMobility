@@ -10,14 +10,14 @@ except FileNotFoundError:
 
 setup(
     name="pyspainmobility",
-    version="1.0.1",
+    version="1.0.2",
     author="Massimiliano Luca",
     author_email="mluca@fbk.eu",
-    description="Tools for downloading and processing Spanish mobility data from MITMA",
+    description="Library for downloading and processing Spanish mobility data from MITMA",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/pySpainMobility/pySpainMobility",
-    license="MIT",
+    license="BSD 3-Clause License",
     package_dir={"": "."},
     packages=find_packages(include=["pyspainmobility", "pyspainmobility.*"]),
     python_requires=">=3.9",
@@ -45,7 +45,7 @@ setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: BSD 3-Clause License",
         "Operating System :: OS Independent",
     ],
 )
