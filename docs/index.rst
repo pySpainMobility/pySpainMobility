@@ -10,11 +10,6 @@
 pySpainMobility Documentation
 ##################################
 
-.. image:: https://github.com/pySpainMobility/pySpainMobility/blob/main/logo_small.png?raw=true
-   :alt: pySpainMobility logo
-   :align: center
-   :width: 200px
-
 **Standardized access to Spain's official mobility datasets**
 
 Welcome to the documentation for pySpainMobility - an open-source Python package developed by the research community to access, download, and standardize mobility data published by the `Spanish Ministry of Transportation and Sustainable Mobility <https://www.transportes.gob.es>`_.
@@ -39,14 +34,14 @@ Key Features
 Getting Started
 ********************
 
-Installation (recommended)
+Installation
 ==========================
 .. code-block:: bash
 
-   # Using conda (recommended)
+   # Using conda 
    conda install -c conda-forge pyspainmobility
 
-   # Alternative pip installation
+   # pip installation
    pip install pyspainmobility
 
 ********************
