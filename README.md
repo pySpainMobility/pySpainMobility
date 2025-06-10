@@ -1,7 +1,7 @@
 # pySpainMobility
 
 ## A Python package to access, download and starndardise 
-![logo small]([http://url/to/img.png](https://github.com/pySpainMobility/pySpainMobility/blob/main/logo_small.png?raw=true))
+![logo small]([https://raw.githubusercontent.com/pySpainMobility/pySpainMobility/refs/heads/main/logo_small.png])
 
 Mobility patterns play a critical role in a wide range of societal challenges, from epidemic modeling and emergency response to transportation planning and regional development. Yet, access to high-quality, timely, and openly available mobility data remains limited. In response, the [Spanish Ministry of Transportation and Sustainable Mobility](https://www.transportes.gob.es) has released daily [mobility datasets](https://www.transportes.gob.es/ministerio/proyectos-singulares/estudios-de-movilidad-con-big-data/metodologia-del-estudio-de-movilidad-con-bigdata) based on anonymized mobile phone data, covering districts, municipalities, and greater urban areas from February 2020 to June 2021 (`version 1`) and again from January 2022 onward (`version 2`). `pySpainMobility` is a Python package that simplifies access to these datasets and their associated spatial tessellations through a standardized, well-documented interface. By lowering the technical barrier to working with large-scale mobility data, the package enables reproducible analysis and supports applications across research, policy, and operational domains.
 
