@@ -58,10 +58,14 @@ BibTeX entry:
 
 .. code-block:: bibtex
 
-   @article{beneduce2025pyspainmobility,
-     title={pySpainMobility: a Python Package to Access and Manage Spanish Open Mobility Data},
-     author={Beneduce, Ciro and Gullón Muñoz-Repiso, Tania and Lepri, Bruno and Luca, Massimiliano},
-     year={2025}
+   @misc{beneduce2025pyspainmobility,
+      title={pySpainMobility: a Python Package to Access and Manage Spanish Open Mobility Data}, 
+      author={Ciro Beneduce and Tania Gullón Muñoz-Repiso and Bruno Lepri and Massimiliano Luca},
+      year={2025},
+      eprint={2506.13385},
+      archivePrefix={arXiv},
+      primaryClass={cs.CY},
+      url={https://arxiv.org/abs/2506.13385}, 
    }
 
 ********************
