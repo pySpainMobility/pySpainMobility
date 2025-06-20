@@ -1,6 +1,6 @@
 {% set name = "pyspainmobility" %}
-{% set version = "1.0.1" %}
-{% set  python_min >= "3.9" %}
+{% set version = "1.0.2" %}
+{% set python_min = "3.9" %}
 
 
 package:
@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/pyspainmobility-{{ version }}.tar.gz
-  sha256: 77cfdcee222dee2758552e2d49cad2716a957aadc2324fa29bbadb6bd49cda0b
+  sha256: a4ee4bd4671ac46741b50547dc065c10a05c4f292cd14be609f35f5a2aafc436
 
 build:
   noarch: python
@@ -20,15 +20,14 @@ requirements:
   host:
     - python {{ python_min }}
     - pip
-    - setuptools >69.0
+    - setuptools
     - wheel
   run:
-    - python {{ python_min }}
+    - python >={{ python_min }}
     - geopandas >=1.0.1,<1.1.dev0
     - tqdm >=4.0.0
     - matplotlib-base >=3.0.0
     - pyarrow >=8.0.0
-    - dask >=2024.0
     - dask-core >=2024.0
 
 test:
@@ -40,10 +39,11 @@ test:
     - pip
     - python {{ python_min }}
 
+
 about:
   home: https://github.com/pySpainMobility/pySpainMobility
-  summary: Tools for downloading and processing Spanish mobility data from MITMA
-  license: MIT
+  summary: Library for downloading and processing Spanish mobility data from MITMA
+  license: BSD-3-Clause
   license_file: LICENSE
 
 extra:
