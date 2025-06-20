@@ -537,6 +537,71 @@ class Mobility:
                 self._saving_parquet(df, m_type)
                 if return_df:
                     return df
+                
+        if self.version == 1:
+            m_type = 'maestra2'
+            local_list = self._donwload_helper(m_type)
+            temp_dfs = []
+            print('Generating parquet file for Number of Trips....')
+
+            if self.use_dask and len(local_list) > 1:  # multiple files
+                # Use Dask for larger datasets
+                @delayed
+                def process_trips_file(filepath):
+                    try:
+                        df = pd.read_csv(filepath, sep='|')
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'distrito': 'overnight_stay_area',
+                            'numero_viajes': 'number_of_trips',
+                            'personas': 'people'
+                        }, inplace=True)
+
+                        if len(df) > 0:
+                            tmp_date = str(df.iloc[0]['date'])
+                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
+                        return df
+                    except Exception as e:
+                        print(f"Error processing {filepath}: {e}")
+                        return None
+
+                delayed_tasks = [process_trips_file(f) for f in local_list]
+                processed_dfs = dd.compute(*delayed_tasks)
+                valid_dfs = [df for df in processed_dfs if df is not None]
+
+                if valid_dfs:
+                    df = pd.concat(valid_dfs, ignore_index=True)
+                else:
+                    return None
+            else:
+                # Original pandas processing
+                for f in tqdm.tqdm(local_list):
+                    try:
+                        df = pd.read_csv(f, sep='|')
+
+                        df.rename(columns={
+                            'fecha': 'date',
+                            'distrito': 'overnight_stay_area',
+                            'numero_viajes': 'number_of_trips',
+                            'personas': 'people'
+                        }, inplace=True)
+
+                        tmp_date = str(df.loc[0]['date'])
+                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
+                        df['date'] = new_date
+
+                        temp_dfs.append(df)
+                    except Exception as e:
+                        print(f"Error processing file: {e}")
+                        continue
+
+                print('Concatenating all the dataframes....')
+                df = pd.concat(temp_dfs) if temp_dfs else None
+
+            if df is not None:
+                self._saving_parquet(df, m_type)
+                if return_df:
+                    return df
 
         return None
 
