@@ -273,6 +273,32 @@ class Mobility:
                 self._saving_parquet(df, m_type)
                 return df if return_df else None
 
+        elif self.version == 1:
+            m_type = "maestra1"
+            local_list = self._donwload_helper(m_type)
+            temp_dfs = []
+            print("Generating parquet file for ODs....")
+
+            if self.use_dask:
+                # Use Dask for processing
+                return self._process_od_data_dask(local_list, m_type, False, False, return_df)
+            else:
+                # Original pandas processing using extracted method
+                for f in tqdm.tqdm(local_list):
+                    result = self._process_single_od_file(f, False, False)
+                    if result is not None:
+                        temp_dfs.append(result)
+
+                if not temp_dfs:
+                    print("No valid data found")
+                    return None
+
+                print("Concatenating all the dataframes....")
+                df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
+
+                self._saving_parquet(df, m_type)
+                return df if return_df else None
+
         return None
 
     def _process_od_data_dask(self, local_list, m_type, keep_activity, social_agg, return_df):
@@ -402,6 +428,9 @@ class Mobility:
                 self._saving_parquet(df, m_type)
                 if return_df:
                     return df
+
+        elif self.version == 1:
+            raise Exception('Overnight stays data is not available for version 1. Please use version 2.')
         return None
 
     def get_number_of_trips_data(self, return_df: bool = False):
