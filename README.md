@@ -68,3 +68,8 @@ Note that it is **NOT recommended** to install scikit-mobility from PyPI! If you
 ## Examples
 
 Examples can be found in the repository named [Examples](https://github.com/pySpainMobility/examples)
+
+
+### Working with R?
+
+If you prefer R, check out the [spanishoddata](https://github.com/rOpenSpain/spanishoddata) package by Egor Kotov et al.

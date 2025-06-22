@@ -79,7 +79,7 @@ class Zones:
             file_name = link.split('/')[-1]
 
             # Check if the file exists in the data directory
-            local_path = os.path.join(data_directory, file_name)  # FIX: Use os.path.join
+            local_path = os.path.join(self.output_path, file_name) 
 
             if not os.path.exists(local_path):
                 # Download the file
@@ -88,7 +88,7 @@ class Zones:
 
             # unzip zonification_distritos.zip or zonificacion_municipios.zip if version is 1
             if version == 1 and file_name.endswith('.zip'):
-                utils.unzip_file(os.path.join(data_directory, file_name), data_directory)
+                utils.unzip_file(os.path.join(self.output_path, file_name), self.output_path)
 
         print('Zones already downloaded. Reading the files....')
         complete_df = None
@@ -165,6 +165,25 @@ class Zones:
 
             # make it available to the rest of the class
             self.complete_df = complete_df
+
+        if complete_df is None and version == 1:
+
+            zonification = gpd.read_file(
+                os.path.join(self.output_path, f"zonificacion-{zones}/{zones}_mitma.shp")
+            )
+            if zonification.crs is None or zonification.crs.to_epsg() != 4326:
+                zonification = zonification.to_crs(epsg=4326)
+
+            complete_df = zonification
+            complete_df.rename(columns={"ID": "id"}, inplace=True)
+            complete_df.set_index("id", inplace=True)
+
+            # write the cache file
+            complete_df.to_file(output_file_path, driver="GeoJSON")
+
+            # make it available to the rest of the class
+            self.complete_df = complete_df
+
 
     def get_zone_geodataframe(self):
         """

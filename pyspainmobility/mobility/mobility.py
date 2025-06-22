@@ -69,11 +69,26 @@ class Mobility:
             end_date = start_date
         utils.date_format_assert(end_date)
 
+        # --- fail fast if the end date is before the start date ---
+        from pandas import to_datetime
+        if to_datetime(end_date) < to_datetime(start_date):
+            raise ValueError(
+                f"end_date ({end_date}) must be the same as or after start_date ({start_date})."
+            )
+
         self.zones = utils.zone_normalization(zones)
 
         data_directory = utils.get_data_directory()
 
         self.dates = utils.get_dates_between(start_date, end_date)
+
+        valid_dates = utils.get_valid_dates(self.version)
+
+        first, last = valid_dates[0], valid_dates[-1]
+        if self.dates[0] < first or self.dates[-1] > last:
+            raise ValueError(
+                f"Version {self.version} data are only available from {first} to {last}. "
+                f"You requested from {self.start_date} to {self.end_date}.")
 
         # proper directory handling
         if output_directory is not None:
