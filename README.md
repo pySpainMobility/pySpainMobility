@@ -62,7 +62,7 @@ Note that it is **NOT recommended** to install scikit-mobility from PyPI! If you
 
 3. Install `pySpainMobility`
 
-        conda install -c conda-forge pySpainMobility
+        conda install -c pyspainmobility pyspainmobility
 
 <a id='examples'></a>
 ## Examples
