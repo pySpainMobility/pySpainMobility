@@ -45,7 +45,7 @@ def available_mobility_data(version: int = 2) -> pd.DataFrame:
                 date_ymd = None
 
             # check if the file is already downloaded in the data directory
-            local_path = data_directory + tmp_date
+            local_path = os.path.join(data_directory, tmp_date)
             if os.path.exists(local_path):
                 downloaded = True
                 valid_path = local_path
@@ -97,12 +97,15 @@ def available_zoning_data(version: int = 2, zone:str = None) -> pd.DataFrame:
     return pd.DataFrame(data, columns=['link', 'pub_date', 'filename'])
 
 def zone_assert(zone: str = None, version: int = 2) -> None:
-    assert zone in ["districts", "dist", "distr", "distritos",
-    "municipalities", "muni", "municip", "municipios",
-    "lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"], "zone must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas"
+    normalized_zone = str(zone).lower()
+    assert normalized_zone in [
+        "districts", "dist", "distr", "distritos",
+        "municipalities", "muni", "municip", "municipal", "municipios",
+        "lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"
+    ], "zone must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas"
 
     if version == 1:
-        if zone in ["lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"]:
+        if normalized_zone in ["lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"]:
             raise Exception('gaus is not a valid zone for version 1. Please use version 2 or use a different zone')
 
 def version_assert(version: int = None) -> None:
@@ -115,6 +118,7 @@ def date_format_assert(date: str = None) -> None:
     assert bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date)), "date must be in the format YYYY-MM-DD"
 
 def zone_normalization(zone: str = None) -> str:
+    normalized_zone = str(zone).lower()
     mapping = {
         'districts': 'distritos',
         'dist': 'distritos',
@@ -123,13 +127,15 @@ def zone_normalization(zone: str = None) -> str:
         'municipalities': 'municipios',
         'muni': 'municipios',
         'municip': 'municipios',
+        'municipal': 'municipios',
         'municipios': 'municipios',
         'lua': 'gaus',
         'large_urban_areas': 'gaus',
         'gau': 'gaus',
+        'gaus': 'gaus',
         'grandes_areas_urbanas': 'gaus',
     }
-    return mapping[str(zone).lower()] if zone in mapping else str(zone).lower()
+    return mapping[normalized_zone] if normalized_zone in mapping else normalized_zone
 
 def mobility_type_normalization(mobility_type: str = None, version: int = 2) -> str:
     corrected_mob_type = None
