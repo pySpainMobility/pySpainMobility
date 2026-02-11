@@ -267,7 +267,7 @@ def test_get_overnight_stays_data_normalizes_headers_and_ids(monkeypatch, tmp_pa
     file_path = tmp_path / "overnight_sample.csv.gz"
     content = (
         "\ufefffecha|zona_residencia|zona_pernoctacion|personas\n"
-        "20220101|01001.0|01009.0|42\n"
+        "20220101|01001.0|01009.0|2214.577\n"
     )
     _write_gzip(file_path, content)
 
@@ -278,6 +278,7 @@ def test_get_overnight_stays_data_normalizes_headers_and_ids(monkeypatch, tmp_pa
     assert list(df.columns) == ["date", "residence_area", "overnight_stay_area", "people"]
     assert df.loc[0, "residence_area"] == "01001"
     assert df.loc[0, "overnight_stay_area"] == "01009"
+    assert df.loc[0, "people"] == 2214577
 
 
 def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch, tmp_path):
@@ -297,6 +298,7 @@ def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch,
     assert list(df.columns) == ["date", "overnight_stay_area", "age", "gender", "number_of_trips", "people"]
     assert df.loc[0, "overnight_stay_area"] == "01001"
     assert df.loc[0, "gender"] == "female"
+    assert df.loc[0, "people"] == 128457
 
 
 def test_numeric_parser_removes_unambiguous_dot_grouping_separators():
@@ -305,6 +307,28 @@ def test_numeric_parser_removes_unambiguous_dot_grouping_separators():
 
     unchanged_decimal = Mobility._to_numeric(pd.Series(["128.457"]), strip_thousands=True)
     assert unchanged_decimal.tolist() == [128.457]
+
+
+def test_mitma_integer_parser_matches_blog_style_conversion():
+    converted = Mobility._to_mitma_integer(
+        pd.Series(["1.0", "2214.577", "56.400", "128.457", "1.234.567", "2.000"])
+    )
+    assert converted.tolist() == [1, 2214577, 56400, 128457, 1234567, 2]
+
+
+def test_process_single_od_file_compacts_dot_grouped_flow_sizes(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path)
+
+    file_path = tmp_path / "od_dot_grouped.csv.gz"
+    content = (
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20220101|00|01001|01009|10.098|39.969\n"
+    )
+    _write_gzip(file_path, content)
+
+    df = mobility._process_single_od_file(str(file_path), keep_activity=False, social_agg=False)
+    assert df.loc[0, "n_trips"] == 10098
+    assert df.loc[0, "trips_total_length_km"] == 39969
 
 
 def test_backend_validation_rejects_unknown_backend(monkeypatch, tmp_path):
@@ -565,6 +589,7 @@ def test_get_number_of_trips_data_version1_adds_demographic_columns(monkeypatch,
     assert df.loc[0, "date"] == "2020-03-11"
     assert df.loc[0, "overnight_stay_area"] == "01001"
     assert df.loc[0, "number_of_trips"] == "2"
+    assert df.loc[0, "people"] == 1234
     assert pd.isna(df.loc[0, "age"])
     assert pd.isna(df.loc[0, "gender"])
 

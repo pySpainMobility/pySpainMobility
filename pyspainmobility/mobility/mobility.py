@@ -328,6 +328,28 @@ class Mobility:
                 normalized = normalized.where(~thousands_mask, normalized.str.replace(".", "", regex=False))
         return pd.to_numeric(normalized, errors="coerce")
 
+    @staticmethod
+    def _to_mitma_integer(series: pd.Series) -> pd.Series:
+        """
+        Parse MITMA count-like fields to integers.
+
+        MITMA files encode large integers with dots (e.g. ``2214.577``), which
+        pandas can otherwise interpret as decimals. This parser follows the
+        project convention used in examples/issues:
+        - ``1.0`` -> ``1``
+        - ``2214.577`` -> ``2214577``
+        - ``128.457`` -> ``128457``
+        """
+        normalized = series.astype("string").str.strip()
+        normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
+        normalized = normalized.str.replace(",", ".", regex=False)
+
+        # Keep integer-like values as-is (e.g. "1.0"), but compact dot-separated
+        # values used as grouped counts.
+        integer_like = normalized.str.fullmatch(r"[+-]?\d+(?:\.0+)?")
+        compacted = normalized.where(integer_like, normalized.str.replace(".", "", regex=False))
+        return pd.to_numeric(compacted, errors="coerce").astype("Int64")
+
     def _process_single_od_file(self, filepath, keep_activity, social_agg):
         """Extract common OD file processing logic."""
         
@@ -422,8 +444,8 @@ class Mobility:
         else:
             df["hour"] = df["hour"].astype("string").str.strip()
 
-        df["n_trips"] = self._to_numeric(df["n_trips"], strip_thousands=True)
-        df["trips_total_length_km"] = self._to_numeric(df["trips_total_length_km"], strip_thousands=True)
+        df["n_trips"] = self._to_mitma_integer(df["n_trips"])
+        df["trips_total_length_km"] = self._to_mitma_integer(df["trips_total_length_km"])
 
         df.dropna(
             subset=["date", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
@@ -643,7 +665,7 @@ class Mobility:
             df["date"] = self._normalize_date_series(df["date"])
             df["residence_area"] = self._normalize_identifier_series(df["residence_area"])
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
-            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
+            df["people"] = self._to_mitma_integer(df["people"])
             df.dropna(subset=required_cols, inplace=True)
 
             return df
@@ -714,7 +736,7 @@ class Mobility:
             df["date"] = self._normalize_date_series(df["date"])
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
             df["number_of_trips"] = df["number_of_trips"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
-            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
+            df["people"] = self._to_mitma_integer(df["people"])
 
             df.replace({"gender": {"hombre": "male", "mujer": "female"}}, inplace=True)
             df.dropna(subset=["date", "overnight_stay_area", "number_of_trips", "people"], inplace=True)
