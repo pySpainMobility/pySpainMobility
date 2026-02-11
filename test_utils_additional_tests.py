@@ -33,6 +33,16 @@ def test_zone_assert_accepts_documented_municipal_alias():
     utils.zone_assert("municipal", version=2)
 
 
+def test_zone_assert_rejects_invalid_value():
+    with pytest.raises(ValueError, match="zone must be one of the following"):
+        utils.zone_assert("invalid-zone", version=2)
+
+
+def test_version_assert_rejects_invalid_value():
+    with pytest.raises(ValueError, match="version must be 1 or 2"):
+        utils.version_assert(3)
+
+
 def test_zone_normalization_is_case_insensitive_for_aliases():
     assert utils.zone_normalization("MUNICIPAL") == "municipios"
 
@@ -122,7 +132,7 @@ def test_get_dates_between_is_inclusive():
 
 
 def test_date_format_assert_rejects_invalid_format():
-    with pytest.raises(AssertionError, match="YYYY-MM-DD"):
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
         utils.date_format_assert("2022/01/01")
 
 
@@ -158,4 +168,14 @@ def test_download_file_if_not_existing_replaces_empty_file(monkeypatch, tmp_path
     monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload, status=200))
 
     utils.download_file_if_not_existing("https://example.org/empty.bin", str(output_file))
+    assert output_file.read_bytes() == payload
+
+
+def test_download_file_if_not_existing_supports_filename_only_path(monkeypatch, tmp_path):
+    payload = b"just-file"
+    output_file = tmp_path / "standalone.bin"
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload, status=200))
+    monkeypatch.chdir(tmp_path)
+
+    utils.download_file_if_not_existing("https://example.org/standalone.bin", "standalone.bin")
     assert output_file.read_bytes() == payload

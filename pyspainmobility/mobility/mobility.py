@@ -120,6 +120,11 @@ class Mobility:
         self.dates = utils.get_dates_between(start_date, end_date)
 
         valid_dates = utils.get_valid_dates(self.version)
+        if not valid_dates:
+            raise RuntimeError(
+                f"Could not resolve valid dates for version {self.version}. "
+                "Please check network/data source availability and try again."
+            )
 
         first, last = valid_dates[0], valid_dates[-1]
         if self.dates[0] < first or self.dates[-1] > last:

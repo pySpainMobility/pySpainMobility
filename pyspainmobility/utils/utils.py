@@ -118,24 +118,39 @@ def available_zoning_data(version: int = 2, zone: str = None) -> pd.DataFrame:
 
 def zone_assert(zone: str = None, version: int = 2) -> None:
     normalized_zone = str(zone).lower()
-    assert normalized_zone in [
+    allowed_zones = [
         "districts", "dist", "distr", "distritos",
         "municipalities", "muni", "municip", "municipal", "municipios",
         "lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"
-    ], "zone must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas"
+    ]
+    if normalized_zone not in allowed_zones:
+        raise ValueError(
+            "zone must be one of the following: districts, dist, distr, distritos, "
+            "municipalities, muni, municipal, municipios, lua, large_urban_areas, "
+            "gau, gaus, grandes_areas_urbanas"
+        )
 
     if version == 1:
         if normalized_zone in ["lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"]:
             raise Exception('gaus is not a valid zone for version 1. Please use version 2 or use a different zone')
 
 def version_assert(version: int = None) -> None:
-    assert version in [1, 2], "version must be 1 or 2. Verison 1 contains the data from 2020 to 2021. Version 2 contains the data from 2022 onwards."
+    if version not in [1, 2]:
+        raise ValueError(
+            "version must be 1 or 2. Verison 1 contains the data from 2020 to 2021. "
+            "Version 2 contains the data from 2022 onwards."
+        )
 
 def mobility_assert(mobility_type: str = None) -> None:
-    assert mobility_type in ["od", "origin-destination", "os", "overnight_stays", "nt", "number_of_trips"], "mobility_type must be one of the following: od, origin-destination, os, overnight_stays, nt, number_of_trips"
+    if mobility_type not in ["od", "origin-destination", "os", "overnight_stays", "nt", "number_of_trips"]:
+        raise ValueError(
+            "mobility_type must be one of the following: od, origin-destination, "
+            "os, overnight_stays, nt, number_of_trips"
+        )
 
 def date_format_assert(date: str = None) -> None:
-    assert bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date)), "date must be in the format YYYY-MM-DD"
+    if not bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date)):
+        raise ValueError("date must be in the format YYYY-MM-DD")
 
 def zone_normalization(zone: str = None) -> str:
     normalized_zone = str(zone).lower()
@@ -217,7 +232,9 @@ def download_file_if_not_existing(url: str, local_path: str) -> None:
     if os.path.exists(local_path):
         return
 
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    target_dir = os.path.dirname(local_path)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
 
     try:
         print(f"Downloading: {url}")

@@ -76,6 +76,25 @@ def test_mobility_init_defaults_end_date_to_start_date(monkeypatch, tmp_path):
     assert mobility.end_date == "2022-01-01"
 
 
+def test_mobility_init_raises_clear_error_when_valid_dates_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "zone_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "version_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "date_format_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "get_dates_between", lambda *_: ["2022-01-01"])
+    monkeypatch.setattr(utils, "get_valid_dates", lambda *_: [])
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+
+    with pytest.raises(RuntimeError, match="Could not resolve valid dates"):
+        Mobility(
+            version=2,
+            zones="municipalities",
+            start_date="2022-01-01",
+            end_date="2022-01-01",
+            output_directory=str(tmp_path / "custom_out"),
+            backend="pandas",
+        )
+
+
 def test_mobility_keeps_absolute_output_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(utils, "zone_assert", lambda *args, **kwargs: None)
     monkeypatch.setattr(utils, "version_assert", lambda *args, **kwargs: None)
@@ -159,6 +178,13 @@ def test_zones_version2_reads_supporting_files_from_output_directory(monkeypatch
 def test_zones_default_version_is_2(monkeypatch, tmp_path):
     monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
     zones = Zones(zones="municipalities", output_directory=str(tmp_path / "custom_data"))
+    assert zones.version == 2
+
+
+def test_zones_init_without_explicit_zone_uses_default_municipalities(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+    zones = Zones(output_directory=str(tmp_path / "custom_data"))
+    assert zones.zones == "municipios"
     assert zones.version == 2
 
 
