@@ -126,6 +126,12 @@ def test_zones_version2_reads_supporting_files_from_output_directory(monkeypatch
     assert not any(path.startswith(str(default_dir)) for path in read_paths)
 
 
+def test_zones_default_version_is_2(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+    zones = Zones(zones="municipalities", output_directory=str(tmp_path / "custom_data"))
+    assert zones.version == 2
+
+
 def test_get_zone_relations_uses_output_path_for_version2(monkeypatch, tmp_path):
     out_dir = tmp_path / "custom_data"
     out_dir.mkdir()

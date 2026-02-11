@@ -6,7 +6,7 @@ import matplotlib
 from os.path import expanduser
 
 class Zones:
-    def __init__(self, zones: str = None, version: int = 1, output_directory: str = None):
+    def __init__(self, zones: str = None, version: int = 2, output_directory: str = None):
         """
         Class to handle the zoning related to the Spanish big mobility data. The class is used to download the data and
         process it. Selectable granularities are districts (distritos), municipalities (municipios) and large urban areas (grandes áreas urbanas). As a reminder,
