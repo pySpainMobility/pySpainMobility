@@ -162,16 +162,57 @@ class Mobility:
         return self._read_pipe_file_pandas(filepath, dtype=dtype)
 
     @staticmethod
+    def _normalize_column_name(name: str) -> str:
+        """
+        Normalize a single column name for case-insensitive matching.
+        """
+        return str(name).replace("\ufeff", "").strip().lower()
+
+    @staticmethod
+    def _align_dtype_map_to_source_columns(filepath: str, dtype: dict = None) -> dict | None:
+        """
+        Align dtype mapping keys to real source column names, handling
+        BOM/case/whitespace differences before parsing.
+        """
+        if not dtype:
+            return dtype
+
+        try:
+            header_df = pd.read_csv(
+                filepath,
+                sep="|",
+                compression="infer",
+                encoding="utf-8-sig",
+                nrows=0,
+            )
+        except Exception:
+            return dtype
+
+        normalized_to_source = {
+            Mobility._normalize_column_name(col): col for col in header_df.columns
+        }
+        aligned = {}
+        for requested_col, requested_dtype in dtype.items():
+            source_col = normalized_to_source.get(
+                Mobility._normalize_column_name(requested_col)
+            )
+            if source_col is not None:
+                aligned[source_col] = requested_dtype
+
+        return aligned or dtype
+
+    @staticmethod
     def _read_pipe_file_pandas(filepath: str, dtype: dict = None) -> pd.DataFrame:
         """
         Pandas parser with BOM-safe UTF-8 handling.
         """
+        aligned_dtype = Mobility._align_dtype_map_to_source_columns(filepath, dtype)
         return pd.read_csv(
             filepath,
             sep="|",
             compression="infer",
             encoding="utf-8-sig",
-            dtype=dtype,
+            dtype=aligned_dtype,
             low_memory=False,
         )
 
@@ -191,9 +232,10 @@ class Mobility:
             return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
 
         column_types = None
-        if dtype:
+        aligned_dtype = Mobility._align_dtype_map_to_source_columns(filepath, dtype)
+        if aligned_dtype:
             column_types = {}
-            for col, typ in dtype.items():
+            for col, typ in aligned_dtype.items():
                 if str(typ).lower() == "string":
                     column_types[col] = pa.string()
 

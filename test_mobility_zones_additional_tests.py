@@ -171,7 +171,18 @@ def test_get_zone_relations_uses_output_path_for_version2(monkeypatch, tmp_path)
 
     assert len(df) == 1
     assert df.loc[0, "census_sections"] == "2807901"
-    assert {"census_sections", "municipalities", "municipalities_mitma"}.issubset(df.columns)
+    expected_cols = {
+        "census_sections",
+        "census_districts",
+        "municipalities",
+        "municipalities_mitma",
+        "districts_mitma",
+        "luas_mitma",
+    }
+    assert set(df.columns) == expected_cols
+    assert {"seccion_ine", "distrito_ine", "municipio_ine", "municipio_mitma", "distrito_mitma", "gau_mitma"}.isdisjoint(
+        df.columns
+    )
     assert calls["available"] == 1
     assert calls["download"] == 0
 
@@ -366,6 +377,40 @@ def test_get_od_data_aggregates_when_activity_and_social_not_requested(monkeypat
     assert df.loc[0, "trips_total_length_km"] == 5
 
 
+def test_get_od_data_version1_translates_headers_and_schema(monkeypatch, tmp_path):
+    mobility = _build_mobility(
+        monkeypatch,
+        tmp_path,
+        backend="pandas",
+        version=1,
+        start_date="2020-03-11",
+        end_date="2020-03-11",
+    )
+
+    file_path = tmp_path / "od_v1_sample.txt.gz"
+    content = (
+        "\ufeffFECHA|PERIODO|ORIGEN|DESTINO|VIAJES|VIAJES_KM\n"
+        "20200311|00|01001.0|01009.0|1.0|2.5\n"
+    )
+    _write_gzip(file_path, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+
+    df = mobility.get_od_data(return_df=True)
+
+    assert list(df.columns) == [
+        "date",
+        "hour",
+        "id_origin",
+        "id_destination",
+        "n_trips",
+        "trips_total_length_km",
+    ]
+    assert {"fecha", "periodo", "origen", "destino", "viajes", "viajes_km"}.isdisjoint(df.columns)
+    assert df.loc[0, "date"] == "2020-03-11"
+    assert df.loc[0, "id_origin"] == "01001"
+    assert df.loc[0, "id_destination"] == "01009"
+
+
 def test_get_od_data_keeps_activity_and_social_dimensions(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
 
@@ -460,6 +505,7 @@ def test_get_number_of_trips_data_version1_adds_demographic_columns(monkeypatch,
     df = mobility.get_number_of_trips_data(return_df=True)
 
     assert {"date", "overnight_stay_area", "number_of_trips", "people", "age", "gender"}.issubset(df.columns)
+    assert {"fecha", "distrito", "numero_viajes", "personas"}.isdisjoint(df.columns)
     assert df.loc[0, "date"] == "2020-03-11"
     assert df.loc[0, "overnight_stay_area"] == "01001"
     assert df.loc[0, "number_of_trips"] == "2"
