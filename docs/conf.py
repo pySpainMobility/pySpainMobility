@@ -6,6 +6,7 @@
 import sys
 import os
 from pathlib import Path
+import re
 
 # -- Path setup --------------------------------------------------------------
 
@@ -16,8 +17,11 @@ sys.path.insert(0, os.path.abspath(".."))
 project = 'pySpainMobility'
 copyright = ''
 author = 'Ciro Beneduce, Tania Gullón Muñoz-Repiso, Bruno Lepri, Massimiliano Luca'
-release = '0.1.0'
-version = '0.1.0'
+project_root = Path(__file__).resolve().parents[1]
+init_file = project_root / "pyspainmobility" / "__init__.py"
+match = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
+release = match.group(1) if match else "0.0.0"
+version = ".".join(release.split(".")[:2])
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -74,22 +78,7 @@ language = 'en'
 # --HTML output -------------------------------------------------
 html_theme = "furo"
 html_logo = "../logo.png"
-html_theme_options = {
-    "canonical_url": "",
-    "analytics_id": "UA-XXXXXXX-1",
-    "logo_only": False,
-    "display_version": True,
-    "prev_next_buttons_location": "bottom",
-    "style_external_links": False,
-    "vcs_pageview_mode": "",
-    "style_nav_header_background": "white",
-    # Toc options
-    "collapse_navigation": True,
-    "sticky_navigation": True,
-    "navigation_depth": 4,
-    "includehidden": True,
-    "titles_only": False,
-}
+html_theme_options = {}
 
 html_theme_path = [
     "_themes",

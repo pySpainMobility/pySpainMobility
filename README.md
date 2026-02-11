@@ -29,13 +29,10 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
 <a id='installation'></a>
 ## Installation
-scikit-mobility for Python >= 3.8 and all it's dependencies are available from conda-forge and can be installed using
-`conda install -c conda-forge scikit-mobility`.
-
-Note that it is **NOT recommended** to install scikit-mobility from PyPI! If you're on Windows or Mac, many GeoPandas / scikit-mobility dependencies cannot be pip installed (for details see the corresponding notes in the GeoPandas documentation).
+`pySpainMobility` supports Python >= 3.9 and can be installed with `pip` or `conda`.
 
 <a id='installation_pip'></a>
-### installation with pip (python >= 3.8 required)
+### installation with pip (python >= 3.9 required)
 
 1. Create an environment `venv`
 
@@ -68,6 +65,30 @@ Note that it is **NOT recommended** to install scikit-mobility from PyPI! If you
 ## Examples
 
 Examples can be found in the repository named [Examples](https://github.com/pySpainMobility/examples)
+
+## What's New in 1.1.0
+
+- Added `backend` selection in `Mobility` (`backend="arrow"` by default, `backend="pandas"` supported).
+- Added automatic fallback from Arrow to pandas with a warning when `pyarrow` is unavailable.
+- Improved data preprocessing robustness and column normalization/translation.
+- Improved loading behavior when using custom `output_directory` paths.
+- Aligned download behavior between `Mobility` and `Zones` with lazy data fetching.
+
+## Backend Selection
+
+```python
+from pyspainmobility import Mobility
+
+mobility = Mobility(
+    version=2,
+    zones="municipalities",
+    start_date="2022-01-01",
+    end_date="2022-01-03",
+    backend="arrow",  # default
+)
+```
+
+If `backend="arrow"` is selected but `pyarrow` is not installed, `pySpainMobility` automatically falls back to `pandas` and emits a warning.
 
 
 ### Working with R?

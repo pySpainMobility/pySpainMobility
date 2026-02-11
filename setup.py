@@ -10,7 +10,7 @@ except FileNotFoundError:
 
 setup(
     name="pyspainmobility",
-    version="1.0.4",
+    version="1.1.0",
     author="Massimiliano Luca",
     author_email="mluca@fbk.eu",
     description="Library for downloading and processing Spanish mobility data from MITMA",

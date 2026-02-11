@@ -15,8 +15,7 @@ pySpainMobility Documentation
 Welcome to the documentation for pySpainMobility - an open-source Python package developed by the research community to access, download, and standardize mobility data published by the `Spanish Ministry of Transportation and Sustainable Mobility <https://www.transportes.gob.es>`_.
 
 .. note::
-   This is a **FIRST release** (both library and documentation). 
-   Please report any issues or suggestions via our `GitHub repository <https://github.com/pySpainMobility/pySpainMobility/issues>`_.
+   Please report issues or suggestions via our `GitHub repository <https://github.com/pySpainMobility/pySpainMobility/issues>`_.
 
 ********************
 Key Features
@@ -28,6 +27,7 @@ Key Features
    - Time periods from February 2020 to 2021 and from 2022 to present
 - 📦 Standardized data structures for consistent analysis
 - 🌐 Built-in spatial tessellation handling
+- ⚡ Arrow-first mobility parsing with automatic pandas fallback
 - 📈 Designed for research reproducibility and policy applications
 
 ********************
@@ -44,9 +44,9 @@ Installation
    # pip installation
    pip install pyspainmobility
 
-********************
+**********************
 Citing pySpainMobility
-********************
+**********************
 If you use this package in your research, please cite:
 
 .. code-block:: text
@@ -68,18 +68,9 @@ BibTeX entry:
       url={https://arxiv.org/abs/2506.13385}, 
    }
 
-********************
+************************
 Documentation Contents
-********************
-
-.. toctree::
-   :caption: User Guide
-   :maxdepth: 2
-   
-   installation
-   examples
-   data_overview
-   contributing
+************************
 
 .. toctree::
    :caption: API Reference
