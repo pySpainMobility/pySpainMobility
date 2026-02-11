@@ -76,6 +76,36 @@ def test_mobility_init_defaults_end_date_to_start_date(monkeypatch, tmp_path):
     assert mobility.end_date == "2022-01-01"
 
 
+def test_mobility_keeps_absolute_output_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "zone_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "version_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "date_format_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "get_dates_between", lambda *_: ["2022-01-01"])
+    monkeypatch.setattr(utils, "get_valid_dates", lambda *_: ["2022-01-01", "2022-12-31"])
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+
+    absolute_out = str(tmp_path / "nested" / "abs_mobility_output")
+    mobility = Mobility(
+        version=2,
+        zones="municipalities",
+        start_date="2022-01-01",
+        end_date="2022-01-01",
+        output_directory=absolute_out,
+        backend="pandas",
+    )
+
+    assert mobility.output_path == absolute_out
+
+
+def test_zones_keeps_absolute_output_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+
+    absolute_out = str(tmp_path / "nested" / "abs_zones_output")
+    zones = Zones(zones="municipalities", version=2, output_directory=absolute_out)
+
+    assert zones.output_path == absolute_out
+
+
 def test_zones_version2_reads_supporting_files_from_output_directory(monkeypatch, tmp_path):
     output_dir = tmp_path / "custom_data"
     output_dir.mkdir()
@@ -511,6 +541,21 @@ def test_get_number_of_trips_data_version1_adds_demographic_columns(monkeypatch,
     assert df.loc[0, "number_of_trips"] == "2"
     assert pd.isna(df.loc[0, "age"])
     assert pd.isna(df.loc[0, "gender"])
+
+
+def test_download_helper_logs_warnings_on_failed_download(monkeypatch, tmp_path, capsys):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
+
+    def fail_download(*_args, **_kwargs):
+        raise RuntimeError("network failure")
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fail_download)
+
+    files = mobility._donwload_helper("Viajes")
+    captured = capsys.readouterr()
+
+    assert files == []
+    assert "[warn] Failed to download" in captured.out
 
 
 def test_zone_geodataframe_is_cached_after_first_load(monkeypatch, tmp_path):

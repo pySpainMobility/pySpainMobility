@@ -68,9 +68,12 @@ def unzip_file(file: str, destination: str) -> None:
         zip_ref.extractall(destination)
         print(f'Unzipped {file} to {destination}')
 
-def available_zoning_data(version: int = 2, zone:str = None) -> pd.DataFrame:
+def available_zoning_data(version: int = 2, zone: str = None) -> pd.DataFrame:
     version_assert(version)
-    zone_assert(zone)
+    normalized_zone = None
+    if zone is not None:
+        zone_assert(zone, version)
+        normalized_zone = zone_normalization(zone)
 
     url = None
 
@@ -81,6 +84,24 @@ def available_zoning_data(version: int = 2, zone:str = None) -> pd.DataFrame:
 
     data = []
 
+    relation_files = {
+        "relacion_ine_zonificacionMitma.csv",
+        "relaciones_municipio_mitma.csv",
+        "relaciones_distrito_mitma.csv",
+    }
+    if normalized_zone is None:
+        zone_files_pattern = (
+            r"(zonificacion_(municipios|distritos|gaus)\..*)|"
+            r"(poblacion_(municipios|distritos|gaus)\..*)|"
+            r"(nombres_(municipios|distritos|gaus)\..*)"
+        )
+    else:
+        zone_files_pattern = (
+            rf"(zonificacion_{normalized_zone}\..*)|"
+            rf"(poblacion_{normalized_zone}\..*)|"
+            rf"(nombres_{normalized_zone}\..*)"
+        )
+
     with urlopen(url) as f:
         tree = ET.parse(f)
         # link, file_extension, data_ym, data_ymd, local_path, downloaded
@@ -88,11 +109,10 @@ def available_zoning_data(version: int = 2, zone:str = None) -> pd.DataFrame:
             link = item.findtext('link')
             pubdate = item.findtext('pubDate')
             tmp_date = link.split('/')[-1]
-            # if one between zonification_, poblacion or relacion_ine_zonificacionMitma is in the tmp_date, add it to the data
-            if zone is not None:
-                normalize_zone = zone_normalization(zone)
-                if bool(re.match(f"(zonificacion_{normalize_zone}\\.*)|(poblacion_{normalize_zone}\\.*)|(nombres_{normalize_zone}\\.*)|(poblacion.csv)|(relacion_ine_zonificacionMitma.csv)|(relaciones_municipio_mitma.csv)|(relaciones_distrito_mitma.csv)", tmp_date)):
-                    data.append([link, pubdate, tmp_date])
+            is_relation_file = tmp_date in relation_files
+            is_zone_specific_file = bool(re.fullmatch(zone_files_pattern, tmp_date))
+            if is_relation_file or is_zone_specific_file:
+                data.append([link, pubdate, tmp_date])
 
     return pd.DataFrame(data, columns=['link', 'pub_date', 'filename'])
 

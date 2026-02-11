@@ -67,6 +67,43 @@ def test_available_mobility_data_marks_existing_file_as_downloaded(monkeypatch, 
     assert Path(df.iloc[0]["local_path"]) == existing_file
 
 
+def test_available_zoning_data_rejects_luas_for_version1():
+    with pytest.raises(Exception, match="not a valid zone for version 1"):
+        utils.available_zoning_data(version=1, zone="gaus")
+
+
+def test_available_zoning_data_zone_none_returns_all_zoning_entries(monkeypatch):
+    rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item>
+      <title>zoning municipios</title>
+      <link>https://example.org/zonificacion_municipios.shp</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>relation</title>
+      <link>https://example.org/relacion_ine_zonificacionMitma.csv</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>irrelevant</title>
+      <link>https://example.org/unrelated_file.csv</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    df = utils.available_zoning_data(version=2, zone=None)
+
+    assert set(df["filename"]) == {
+        "zonificacion_municipios.shp",
+        "relacion_ine_zonificacionMitma.csv",
+    }
+
+
 def test_mobility_type_normalization_handles_aliases():
     assert utils.mobility_type_normalization("od", version=2) == "Viajes"
     assert utils.mobility_type_normalization("origin-destination", version=2) == "Viajes"

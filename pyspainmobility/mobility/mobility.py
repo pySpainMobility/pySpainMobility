@@ -129,14 +129,13 @@ class Mobility:
 
         # proper directory handling
         if output_directory is not None:
-            # Always treat as relative to home directory unless it's a proper absolute system path
-            if os.path.isabs(output_directory) and os.path.exists(os.path.dirname(output_directory)):
-                # It's a valid absolute path
+            if os.path.isabs(output_directory):
+                # Preserve absolute paths even if parent directories do not exist yet.
                 self.output_path = output_directory
             else:
-                # Treat as relative to home directory, strip leading slash if present
+                # Treat relative paths as relative to home directory.
                 home = expanduser("~")
-                clean_path = output_directory.lstrip('/')
+                clean_path = output_directory.lstrip("/\\")
                 self.output_path = os.path.join(home, clean_path)
         else:
             self.output_path = data_directory
@@ -894,7 +893,8 @@ class Mobility:
                 try:
                     utils.download_file_if_not_existing(download_url,os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
                     local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
-                except:
+                except Exception as exc:
+                    print(f"[warn] Failed to download {download_url}: {exc}")
                     continue
         elif self.version == 1:
 
@@ -908,6 +908,7 @@ class Mobility:
                     url_base = f"https://opendata-movilidad.mitma.es/{m_type}-mitma-{self.zones}/ficheros-diarios/{d_first}/{d_second}_{m_type[:-1]}_{m_type[-1]}_mitma_{self.zones[:-1]}.txt.gz"
                     utils.download_file_if_not_existing(url_base, os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
                     local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
-                except:
+                except Exception as exc:
+                    print(f"[warn] Failed to download {url_base}: {exc}")
                     continue
         return local_list
