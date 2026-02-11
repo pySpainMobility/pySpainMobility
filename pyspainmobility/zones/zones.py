@@ -6,7 +6,7 @@ import matplotlib
 from os.path import expanduser
 
 class Zones:
-    def __init__(self, zones: str = None, version: int = 1, output_directory: str = None):
+    def __init__(self, zones: str = 'municipalities', version: int = 2, output_directory: str = None):
         """
         Class to handle the zoning related to the Spanish big mobility data. The class is used to download the data and
         process it. Selectable granularities are districts (distritos), municipalities (municipios) and large urban areas (grandes áreas urbanas). As a reminder,
@@ -42,10 +42,10 @@ class Zones:
         utils.version_assert(version)
         utils.zone_assert(zones, version)
         self.version = version
-        zones = utils.zone_normalization(zones)
-        self.zones = zones
-        links = utils.available_zoning_data(version, zones)['link'].unique().tolist()
-        self.complete_df = None  
+        self.zones = utils.zone_normalization(zones)
+        self.complete_df = None
+        self._zoning_links = None
+        self._downloads_ready = False
 
         # Get the data directory
         data_directory = utils.get_data_directory()
@@ -53,14 +53,13 @@ class Zones:
         
         # Proper output directory handling
         if output_directory is not None:
-            # Always treat as relative to home directory unless it's a proper absolute system path
-            if os.path.isabs(output_directory) and os.path.exists(os.path.dirname(output_directory)):
-                # It's a valid absolute path
+            if os.path.isabs(output_directory):
+                # Preserve absolute paths even if parent directories do not exist yet.
                 self.output_path = output_directory
             else:
-                # Treat as relative to home directory, strip leading slash if present
+                # Treat relative paths as relative to home directory.
                 home = expanduser("~")
-                clean_path = output_directory.lstrip('/')
+                clean_path = output_directory.lstrip("/\\")
                 self.output_path = os.path.join(home, clean_path)
         else:
             self.output_path = data_directory
@@ -72,77 +71,94 @@ class Zones:
             raise PermissionError(f"Cannot create directory {self.output_path}. Please check permissions or use a different path. Error: {e}")
         except Exception as e:
             raise Exception(f"Error creating directory {self.output_path}: {e}")
-        
-        # for each link, check if the file exists in the data directory. If not, download it
-        for link in links:
-            # Get the file name
-            file_name = link.split('/')[-1]
 
-            # Check if the file exists in the data directory
-            local_path = os.path.join(self.output_path, file_name) 
+    def _get_zoning_links(self) -> list:
+        """
+        Resolve available zoning links lazily.
+        """
+        if self._zoning_links is None:
+            self._zoning_links = (
+                utils.available_zoning_data(self.version, self.zones)["link"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+        return self._zoning_links
+
+    def _ensure_zoning_files_downloaded(self) -> None:
+        """
+        Download required files only when the user first requests data.
+        """
+        if self._downloads_ready:
+            return
+
+        links = self._get_zoning_links()
+        for link in links:
+            file_name = link.split("/")[-1]
+            local_path = os.path.join(self.output_path, file_name)
 
             if not os.path.exists(local_path):
-                # Download the file
                 print("Downloading necessary files....")
                 utils.download_file_if_not_existing(link, local_path)
 
-            # unzip zonification_distritos.zip or zonificacion_municipios.zip if version is 1
-            if version == 1 and file_name.endswith('.zip'):
-                utils.unzip_file(os.path.join(self.output_path, file_name), self.output_path)
+            if self.version == 1 and file_name.endswith(".zip"):
+                utils.unzip_file(local_path, self.output_path)
 
-        print('Zones already downloaded. Reading the files....')
-        complete_df = None
+        self._downloads_ready = True
 
-        # check if a previously processed file exists in the output directory
-        output_file_path = os.path.join(self.output_path, f'{zones}_{version}.geojson')
+    def _load_zone_geodataframe(self) -> None:
+        """
+        Build/load the zone geodataframe lazily on first access.
+        """
+        if self.complete_df is not None:
+            return
+
+        self._ensure_zoning_files_downloaded()
+        print("Zones already downloaded. Reading the files....")
+        output_file_path = os.path.join(self.output_path, f"{self.zones}_{self.version}.geojson")
 
         if os.path.exists(output_file_path):
             print(f"File {output_file_path} already exists. Loading it...")
-            complete_df = gpd.read_file(output_file_path)
-            self.complete_df = complete_df
+            self.complete_df = gpd.read_file(output_file_path)
+            return
 
-        if complete_df is None and version == 2:
-
+        if self.version == 2:
             def _read_pipe_csv(path, cols):
                 """
                 Read a ‘|’-separated MITMA CSV that may or may not contain a header
-                and may start with a UTF-8 BOM.  Returns a tidy DataFrame.
+                and may start with a UTF-8 BOM. Returns a tidy DataFrame.
                 """
                 df = pd.read_csv(
                     path,
                     sep="|",
                     dtype=str,
-                    header=None,        # read everything as data
+                    header=None,
                     names=cols,
-                    encoding="utf-8-sig"
+                    encoding="utf-8-sig",
                 )
                 df[cols[0]] = df[cols[0]].str.strip()
-
-                # drop stray header row, if present
                 if df.iloc[0, 0].upper() == cols[0].upper():
                     df = df.iloc[1:]
-
                 return df
 
             nombre = _read_pipe_csv(
-                os.path.join(data_directory, f"nombres_{zones}.csv"),
-                ["ID", "name"]
+                self._resolve_data_file(f"nombres_{self.zones}.csv"),
+                ["ID", "name"],
             )
             pop = (
                 _read_pipe_csv(
-                    os.path.join(data_directory, f"poblacion_{zones}.csv"),
-                    ["ID", "population"]
+                    self._resolve_data_file(f"poblacion_{self.zones}.csv"),
+                    ["ID", "population"],
                 )
                 .replace("NA", None)
             )
 
             zonification = gpd.read_file(
-                os.path.join(data_directory, f"zonificacion_{zones}.shp")
+                self._resolve_data_file(f"zonificacion_{self.zones}.shp")
             )
             if zonification.crs is None or zonification.crs.to_epsg() != 4326:
                 zonification = zonification.to_crs(epsg=4326)
 
-            # find column holds the municipal code
             for col in zonification.columns:
                 if col.lower() in {"id", "id_1", "codigo", "codigoine", "cod_mun"}:
                     zonification["ID"] = zonification[col].astype(str).str.strip()
@@ -159,31 +175,52 @@ class Zones:
             complete_df.reset_index(inplace=True)
             complete_df.rename(columns={"ID": "id"}, inplace=True)
             complete_df.set_index("id", inplace=True)
-
-            # write the cache file
             complete_df.to_file(output_file_path, driver="GeoJSON")
-
-            # make it available to the rest of the class
             self.complete_df = complete_df
+            return
 
-        if complete_df is None and version == 1:
+        zonification = gpd.read_file(
+            os.path.join(self.output_path, f"zonificacion-{self.zones}/{self.zones}_mitma.shp")
+        )
+        if zonification.crs is None or zonification.crs.to_epsg() != 4326:
+            zonification = zonification.to_crs(epsg=4326)
 
-            zonification = gpd.read_file(
-                os.path.join(self.output_path, f"zonificacion-{zones}/{zones}_mitma.shp")
-            )
-            if zonification.crs is None or zonification.crs.to_epsg() != 4326:
-                zonification = zonification.to_crs(epsg=4326)
+        complete_df = zonification
+        complete_df.rename(columns={"ID": "id"}, inplace=True)
+        complete_df.set_index("id", inplace=True)
+        complete_df.to_file(output_file_path, driver="GeoJSON")
+        self.complete_df = complete_df
 
-            complete_df = zonification
-            complete_df.rename(columns={"ID": "id"}, inplace=True)
-            complete_df.set_index("id", inplace=True)
 
-            # write the cache file
-            complete_df.to_file(output_file_path, driver="GeoJSON")
+    def _resolve_data_file(self, filename: str) -> str:
+        """
+        Resolve a data file path, preferring the instance output path and
+        falling back to the global default data directory for backward
+        compatibility.
+        """
+        preferred = os.path.join(self.output_path, filename)
+        if os.path.exists(preferred):
+            return preferred
 
-            # make it available to the rest of the class
-            self.complete_df = complete_df
+        fallback = os.path.join(utils.get_data_directory(), filename)
+        if os.path.exists(fallback):
+            return fallback
 
+        return preferred
+
+    def _read_relation_table(self, filename: str) -> pd.DataFrame:
+        """
+        Read relation CSV files with robust delimiter detection.
+        """
+        path = self._resolve_data_file(filename)
+        for sep in ("|", ",", ";", "\t"):
+            try:
+                df = pd.read_csv(path, sep=sep, dtype=str, encoding="utf-8-sig")
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
+        return pd.read_csv(path, dtype=str, encoding="utf-8-sig")
 
     def get_zone_geodataframe(self):
         """
@@ -212,34 +249,42 @@ class Zones:
         01009_AM                   Asparrena agregacion de municipios     4599.0
 
         """
+        self._load_zone_geodataframe()
         return self.complete_df
 
     def get_zone_relations(self):
         """
-        TODO
+        Return official mapping tables between INE administrative units and
+        MITMA zoning identifiers.
+
+        For version 2, the returned table includes one row per relation entry
+        with harmonized column names.
+        For version 1, the method returns one row per MITMA zone id, where
+        each relation column contains the set of linked INE identifiers.
 
         Parameters
         ----------
+        None
+
+        Returns
+        -------
+        pandas.DataFrame
+            Relation table between census/municipality identifiers and MITMA
+            zoning identifiers.
 
         Examples
         --------
 
         >>> from pyspainmobility import Zones
-        >>> # instantiate the object
         >>> zones = Zones(zones='municipalities', version=2, output_directory='data')
-        >>> # get the geodataframe with the zones
-        >>> gdf = zones.get_zone_geodataframe()
-        >>> print(gdf.head())
-                                                       name            population
-        ID
-        01001                                        Alegría-Dulantzi     2925.0
-        01002                                                 Amurrio    10307.0
-        01004_AM                  Artziniega agregacion de municipios     3005.0
-        01009_AM                   Asparrena agregacion de municipios     4599.0
-
+        >>> rel = zones.get_zone_relations()
+        >>> rel.columns.tolist()
+        ['census_sections', 'census_districts', 'municipalities',
+         'municipalities_mitma', 'districts_mitma', 'luas_mitma']
         """
+        self._ensure_zoning_files_downloaded()
         if self.version == 2:
-            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), 'relacion_ine_zonificacionMitma.csv'))
+            relacion = self._read_relation_table('relacion_ine_zonificacionMitma.csv')
 
             remapping = {
                 'seccion_ine': 'census_sections',
@@ -254,16 +299,16 @@ class Zones:
             return relacion
         else:
             used_zone = self.zones[:-1]
-            relacion = gpd.read_file(os.path.join(utils.get_data_directory(), f'relaciones_{used_zone}_mitma.csv'))
+            relacion = self._read_relation_table(f'relaciones_{used_zone}_mitma.csv')
 
             relacion.rename(columns={f'{used_zone}_mitma': 'id'}, inplace=True)
 
             if used_zone == 'municipio':
-                temp = gpd.read_file(os.path.join(utils.get_data_directory(), 'relaciones_distrito_mitma.csv'))
+                temp = self._read_relation_table('relaciones_distrito_mitma.csv')
                 relacion = relacion.set_index('id').join(temp.set_index('municipio_mitma')).reset_index()
 
             if used_zone == 'distrito':
-                temp = gpd.read_file(os.path.join(utils.get_data_directory(), 'relaciones_municipio_mitma.csv'))
+                temp = self._read_relation_table('relaciones_municipio_mitma.csv')
                 relacion = relacion.set_index('municipio_mitma').join(temp.set_index('municipio_mitma')).reset_index()
 
             to_rename = {

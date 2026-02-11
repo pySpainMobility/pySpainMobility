@@ -1,10 +1,18 @@
-from typing import Any
 from pandas.errors import EmptyDataError 
 from pyspainmobility.utils import utils
 import os
 import pandas as pd
 import tqdm
+import warnings
 from os.path import expanduser
+
+# Optional Arrow import – used when backend='arrow'
+try:
+    import pyarrow as pa
+    import pyarrow.csv as pacsv
+except ImportError:
+    pa = None
+    pacsv = None
 
 # Optional Dask import – only used when caller sets use_dask=True
 try:
@@ -37,6 +45,13 @@ class Mobility:
         The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
     use_dask : bool
         Whether to use Dask for processing large datasets. Default is False. Requires dask to be installed.
+    backend : str
+        Dataframe backend used while reading and processing files. Use
+        'arrow' (default) for Apache Arrow-backed pandas columns
+        (typically faster and more memory-efficient) or 'pandas' for
+        classic pandas dtypes. If 'arrow' is requested but pyarrow is not
+        installed, the class automatically falls back to 'pandas' and
+        emits a warning.
     Examples
     --------
     >>> from pyspainmobility import Mobility
@@ -49,13 +64,34 @@ class Mobility:
     >>> # download and save the number of trips data
     >>> mobility_data.get_number_of_trips_data()
     """
-    def __init__(self, version: int = 2, zones: str = 'municipalities', start_date:str = None, end_date:str = None, output_directory:str = None, use_dask: bool = False):
+    def __init__(
+        self,
+        version: int = 2,
+        zones: str = 'municipalities',
+        start_date: str = None,
+        end_date: str = None,
+        output_directory: str = None,
+        use_dask: bool = False,
+        backend: str = "arrow",
+    ):
         self.version = version
         self.zones = zones
         self.start_date = start_date
-        self.end_date = end_date
         self.output_directory = output_directory
         self.use_dask = use_dask
+        self.backend = str(backend).lower()
+
+        if self.backend not in {"arrow", "pandas"}:
+            raise ValueError("backend must be either 'arrow' or 'pandas'")
+        if self.backend == "arrow" and (pa is None or pacsv is None):
+            warnings.warn(
+                "backend='arrow' requested but pyarrow is not installed. "
+                "Falling back to backend='pandas'. Install pyarrow for better "
+                "performance and lower memory usage.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.backend = "pandas"
 
         if self.use_dask and dd is None:
             raise ImportError("Dask is not installed. Please install dask to use use_dask=True")
@@ -68,6 +104,7 @@ class Mobility:
         if end_date is None:
             end_date = start_date
         utils.date_format_assert(end_date)
+        self.end_date = end_date
 
         # --- fail fast if the end date is before the start date ---
         from pandas import to_datetime
@@ -83,6 +120,11 @@ class Mobility:
         self.dates = utils.get_dates_between(start_date, end_date)
 
         valid_dates = utils.get_valid_dates(self.version)
+        if not valid_dates:
+            raise RuntimeError(
+                f"Could not resolve valid dates for version {self.version}. "
+                "Please check network/data source availability and try again."
+            )
 
         first, last = valid_dates[0], valid_dates[-1]
         if self.dates[0] < first or self.dates[-1] > last:
@@ -92,14 +134,13 @@ class Mobility:
 
         # proper directory handling
         if output_directory is not None:
-            # Always treat as relative to home directory unless it's a proper absolute system path
-            if os.path.isabs(output_directory) and os.path.exists(os.path.dirname(output_directory)):
-                # It's a valid absolute path
+            if os.path.isabs(output_directory):
+                # Preserve absolute paths even if parent directories do not exist yet.
                 self.output_path = output_directory
             else:
-                # Treat as relative to home directory, strip leading slash if present
+                # Treat relative paths as relative to home directory.
                 home = expanduser("~")
-                clean_path = output_directory.lstrip('/')
+                clean_path = output_directory.lstrip("/\\")
                 self.output_path = os.path.join(home, clean_path)
         else:
             self.output_path = data_directory
@@ -116,9 +157,179 @@ class Mobility:
             if self.zones == 'gaus':
                 self.zones = 'GAU'
 
+    def _read_pipe_file(self, filepath: str, dtype: dict = None) -> pd.DataFrame:
+        """
+        Read MITMA pipe-separated files using the configured backend.
+        """
+        if self.backend == "arrow":
+            return self._read_pipe_file_arrow(filepath, dtype=dtype)
+        return self._read_pipe_file_pandas(filepath, dtype=dtype)
+
+    @staticmethod
+    def _normalize_column_name(name: str) -> str:
+        """
+        Normalize a single column name for case-insensitive matching.
+        """
+        return str(name).replace("\ufeff", "").strip().lower()
+
+    @staticmethod
+    def _align_dtype_map_to_source_columns(filepath: str, dtype: dict = None) -> dict | None:
+        """
+        Align dtype mapping keys to real source column names, handling
+        BOM/case/whitespace differences before parsing.
+        """
+        if not dtype:
+            return dtype
+
+        try:
+            header_df = pd.read_csv(
+                filepath,
+                sep="|",
+                compression="infer",
+                encoding="utf-8-sig",
+                nrows=0,
+            )
+        except Exception:
+            return dtype
+
+        normalized_to_source = {
+            Mobility._normalize_column_name(col): col for col in header_df.columns
+        }
+        aligned = {}
+        for requested_col, requested_dtype in dtype.items():
+            source_col = normalized_to_source.get(
+                Mobility._normalize_column_name(requested_col)
+            )
+            if source_col is not None:
+                aligned[source_col] = requested_dtype
+
+        return aligned or dtype
+
+    @staticmethod
+    def _read_pipe_file_pandas(filepath: str, dtype: dict = None) -> pd.DataFrame:
+        """
+        Pandas parser with BOM-safe UTF-8 handling.
+        """
+        aligned_dtype = Mobility._align_dtype_map_to_source_columns(filepath, dtype)
+        return pd.read_csv(
+            filepath,
+            sep="|",
+            compression="infer",
+            encoding="utf-8-sig",
+            dtype=aligned_dtype,
+            low_memory=False,
+        )
+
+    @staticmethod
+    def _read_pipe_file_arrow(filepath: str, dtype: dict = None) -> pd.DataFrame:
+        """
+        Apache Arrow CSV parser, converted to an Arrow-backed pandas DataFrame.
+        Falls back to pandas parser if Arrow cannot parse the source.
+        """
+        if pa is None or pacsv is None:
+            warnings.warn(
+                "pyarrow is not available. Falling back to pandas parser. "
+                "Install pyarrow for better performance and lower memory usage.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
+
+        column_types = None
+        aligned_dtype = Mobility._align_dtype_map_to_source_columns(filepath, dtype)
+        if aligned_dtype:
+            column_types = {}
+            for col, typ in aligned_dtype.items():
+                if str(typ).lower() == "string":
+                    column_types[col] = pa.string()
+
+        try:
+            table = pacsv.read_csv(
+                filepath,
+                read_options=pacsv.ReadOptions(encoding="utf8", use_threads=True),
+                parse_options=pacsv.ParseOptions(delimiter="|"),
+                convert_options=pacsv.ConvertOptions(
+                    strings_can_be_null=True,
+                    column_types=column_types,
+                ),
+            )
+            return table.to_pandas(types_mapper=pd.ArrowDtype)
+        except Exception as exc:
+            print(f"[warn] Arrow parser failed for {filepath}: {exc}. Falling back to pandas parser.")
+            return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
+
+    def _finalize_backend_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Normalize output dtypes according to the selected backend.
+        """
+        if self.backend != "arrow" or df is None:
+            return df
+        try:
+            return df.convert_dtypes(dtype_backend="pyarrow")
+        except TypeError:
+            return df.convert_dtypes()
+
+    @staticmethod
+    def _normalize_input_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Normalize incoming column names to avoid translation misses caused by
+        BOMs, casing differences, and surrounding whitespace.
+        """
+        normalized = df.copy()
+        normalized.columns = [
+            str(col).replace("\ufeff", "").strip().lower() for col in normalized.columns
+        ]
+        return normalized
+
+    @staticmethod
+    def _normalize_identifier_series(series: pd.Series) -> pd.Series:
+        """
+        Keep zoning identifiers as strings and remove float artifacts/grouping
+        separators (e.g. '01001.0' -> '01001', '28.079' -> '28079').
+        """
+        normalized = series.astype("string").str.strip()
+        normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
+        normalized = normalized.str.replace(r"\.0+$", "", regex=True)
+        normalized = normalized.str.replace(r"(?<=\d)\.(?=\d)", "", regex=True)
+        return normalized
+
+    @staticmethod
+    def _normalize_date_series(series: pd.Series) -> pd.Series:
+        """
+        Convert MITMA date formats to YYYY-MM-DD.
+        """
+        normalized = series.astype("string").str.strip()
+        normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
+        normalized = normalized.str.replace(r"\.0+$", "", regex=True)
+        normalized = normalized.str.replace("-", "", regex=False)
+        normalized = normalized.str.replace("/", "", regex=False)
+        normalized = normalized.str.replace(" ", "", regex=False)
+        normalized = normalized.str.zfill(8)
+        return (
+            normalized.str.slice(0, 4)
+            + "-"
+            + normalized.str.slice(4, 6)
+            + "-"
+            + normalized.str.slice(6, 8)
+        )
+
+    @staticmethod
+    def _to_numeric(series: pd.Series, strip_thousands: bool = False) -> pd.Series:
+        """
+        Safe numeric conversion with support for comma decimal separators.
+        """
+        normalized = series.astype("string").str.strip()
+        normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
+        normalized = normalized.str.replace(",", ".", regex=False)
+        if strip_thousands:
+            thousands_mask = normalized.str.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+")
+            has_multi_group_separator = normalized.str.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3}){2,}").fillna(False).any()
+            if has_multi_group_separator:
+                normalized = normalized.where(~thousands_mask, normalized.str.replace(".", "", regex=False))
+        return pd.to_numeric(normalized, errors="coerce")
+
     def _process_single_od_file(self, filepath, keep_activity, social_agg):
-        """Extract common file processing logic - DEBUGGING VERSION"""
-        import gzip
+        """Extract common OD file processing logic."""
         
         print(f"Processing file: {filepath}")
         
@@ -135,21 +346,27 @@ class Mobility:
             return None
         
         try:
-            # Check if it's a gzipped file and handle accordingly
-            if filepath.endswith('.gz'):
-                print("Reading gzipped file...")
-                    
-                # Now read with pandas
-                df = pd.read_csv(filepath, sep="|", compression='gzip',   dtype={"origen": "string", "destino": "string"})
-            else:
-                print("Reading regular CSV file...")
-                df = pd.read_csv(filepath, sep="|",   dtype={"origen": "string", "destino": "string"})
-            #Debug prints
-              
-            #print(f"DataFrame shape after reading: {df.shape}")   
-            #print(f"DataFrame columns: {list(df.columns)}")
-            
-            if len(df) == 0:
+            print(f"Reading {'gzipped' if filepath.endswith('.gz') else 'regular'} file...")
+            df = self._read_pipe_file(
+                filepath,
+                dtype={
+                    "fecha": "string",
+                    "periodo": "string",
+                    "origen": "string",
+                    "destino": "string",
+                    "actividad_origen": "string",
+                    "actividad_destino": "string",
+                    "residencia": "string",
+                    "renta": "string",
+                    "edad": "string",
+                    "sexo": "string",
+                    "viajes": "string",
+                    "viajes_km": "string",
+                },
+            )
+            df = self._normalize_input_columns(df)
+
+            if df.empty:
                 print(f"[warn] {os.path.basename(filepath)} contains no data rows, skipped")
                 return None
                 
@@ -160,7 +377,6 @@ class Mobility:
             print(f"[ERROR] Error reading {filepath}: {e}")
             return None
 
-        
         df.rename(
             columns={
                 "fecha": "date",
@@ -181,9 +397,41 @@ class Mobility:
             inplace=True,
         )
 
-        # --- tidy date ---
-        tmp = str(df.loc[0, "date"])
-        df["date"] = f"{tmp[:4]}-{tmp[4:6]}-{tmp[6:8]}"
+        required_cols = ["date", "hour", "id_origin", "id_destination", "n_trips", "trips_total_length_km"]
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            print(
+                f"[warn] {os.path.basename(filepath)} missing expected columns after translation: {missing}. "
+                f"Columns found: {list(df.columns)}"
+            )
+            return None
+
+        for optional_col in ["activity_origin", "activity_destination", "income", "age", "gender"]:
+            if optional_col not in df.columns:
+                df[optional_col] = pd.NA
+
+        df["date"] = self._normalize_date_series(df["date"])
+        df["id_origin"] = self._normalize_identifier_series(df["id_origin"])
+        df["id_destination"] = self._normalize_identifier_series(df["id_destination"])
+        if "residence_province_ine_code" in df.columns:
+            df["residence_province_ine_code"] = self._normalize_identifier_series(df["residence_province_ine_code"])
+
+        hour_numeric = self._to_numeric(df["hour"])
+        if hour_numeric.notna().all():
+            df["hour"] = hour_numeric.astype(int)
+        else:
+            df["hour"] = df["hour"].astype("string").str.strip()
+
+        df["n_trips"] = self._to_numeric(df["n_trips"], strip_thousands=True)
+        df["trips_total_length_km"] = self._to_numeric(df["trips_total_length_km"], strip_thousands=True)
+
+        df.dropna(
+            subset=["date", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
+            inplace=True,
+        )
+        if df.empty:
+            print(f"[warn] {os.path.basename(filepath)} has no valid rows after preprocessing, skipped")
+            return None
 
         #  map activity / gender labels
         df.replace(
@@ -214,11 +462,7 @@ class Mobility:
         if social_agg:
             group_cols += ["income", "age", "gender"]
 
-        df = (
-            df.groupby(group_cols)
-            .sum()[["n_trips", "trips_total_length_km"]]
-            .reset_index()
-        )
+        df = df.groupby(group_cols, as_index=False)[["n_trips", "trips_total_length_km"]].sum()
         
         return df
 
@@ -284,6 +528,7 @@ class Mobility:
 
                 print("Concatenating all the dataframes....")
                 df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
+                df = self._finalize_backend_dataframe(df)
 
                 self._saving_parquet(df, m_type)
                 return df if return_df else None
@@ -310,6 +555,7 @@ class Mobility:
 
                 print("Concatenating all the dataframes....")
                 df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
+                df = self._finalize_backend_dataframe(df)
 
                 self._saving_parquet(df, m_type)
                 return df if return_df else None
@@ -352,9 +598,134 @@ class Mobility:
         
         print("Concatenating results...")
         df = pd.concat(valid_dfs, ignore_index=True)
+        df = self._finalize_backend_dataframe(df)
         
         self._saving_parquet(df, m_type)
         return df if return_df else None
+
+    def _process_single_overnight_file(self, filepath: str):
+        """
+        Parse and normalize one overnight stays file.
+        """
+        try:
+            df = self._read_pipe_file(
+                filepath,
+                dtype={
+                    "fecha": "string",
+                    "zona_residencia": "string",
+                    "zona_pernoctacion": "string",
+                    "personas": "string",
+                },
+            )
+            df = self._normalize_input_columns(df)
+            if df.empty:
+                return None
+
+            df.rename(
+                columns={
+                    "fecha": "date",
+                    "zona_residencia": "residence_area",
+                    "zona_pernoctacion": "overnight_stay_area",
+                    "personas": "people",
+                },
+                inplace=True,
+            )
+
+            required_cols = ["date", "residence_area", "overnight_stay_area", "people"]
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                print(
+                    f"[warn] {os.path.basename(filepath)} missing expected columns after translation: {missing}. "
+                    f"Columns found: {list(df.columns)}"
+                )
+                return None
+
+            df["date"] = self._normalize_date_series(df["date"])
+            df["residence_area"] = self._normalize_identifier_series(df["residence_area"])
+            df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
+            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
+            df.dropna(subset=required_cols, inplace=True)
+
+            return df
+        except EmptyDataError:
+            print(f"[warn] {os.path.basename(filepath)} triggered EmptyDataError, skipped")
+            return None
+        except Exception as e:
+            print(f"Error processing {filepath}: {e}")
+            return None
+
+    def _process_single_number_of_trips_file(self, filepath: str):
+        """
+        Parse and normalize one number-of-trips file for the active version.
+        """
+        try:
+            if self.version == 2:
+                dtype = {
+                    "fecha": "string",
+                    "zona_pernoctacion": "string",
+                    "edad": "string",
+                    "sexo": "string",
+                    "numero_viajes": "string",
+                    "personas": "string",
+                }
+                rename_map = {
+                    "fecha": "date",
+                    "zona_pernoctacion": "overnight_stay_area",
+                    "edad": "age",
+                    "sexo": "gender",
+                    "numero_viajes": "number_of_trips",
+                    "personas": "people",
+                }
+            else:
+                dtype = {
+                    "fecha": "string",
+                    "distrito": "string",
+                    "numero_viajes": "string",
+                    "personas": "string",
+                }
+                rename_map = {
+                    "fecha": "date",
+                    "distrito": "overnight_stay_area",
+                    "numero_viajes": "number_of_trips",
+                    "personas": "people",
+                }
+
+            df = self._read_pipe_file(filepath, dtype=dtype)
+            df = self._normalize_input_columns(df)
+            if df.empty:
+                return None
+
+            df.rename(columns=rename_map, inplace=True)
+
+            required_cols = ["date", "overnight_stay_area", "number_of_trips", "people"]
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                print(
+                    f"[warn] {os.path.basename(filepath)} missing expected columns after translation: {missing}. "
+                    f"Columns found: {list(df.columns)}"
+                )
+                return None
+
+            if "age" not in df.columns:
+                df["age"] = pd.NA
+            if "gender" not in df.columns:
+                df["gender"] = pd.NA
+
+            df["date"] = self._normalize_date_series(df["date"])
+            df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
+            df["number_of_trips"] = df["number_of_trips"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
+            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
+
+            df.replace({"gender": {"hombre": "male", "mujer": "female"}}, inplace=True)
+            df.dropna(subset=["date", "overnight_stay_area", "number_of_trips", "people"], inplace=True)
+
+            return df
+        except EmptyDataError:
+            print(f"[warn] {os.path.basename(filepath)} triggered EmptyDataError, skipped")
+            return None
+        except Exception as e:
+            print(f"Error processing {filepath}: {e}")
+            return None
 
     def get_overnight_stays_data(self, return_df: bool = False):
         """
@@ -383,66 +754,33 @@ class Mobility:
         if self.version == 2:
             m_type = 'Pernoctaciones'
             local_list = self._donwload_helper(m_type)
-            temp_dfs = []
             print('Generating parquet file for Overnight Stays....')
-            
+
             if self.use_dask and len(local_list) > 1:
-                # Use Dask for larger datasets
                 @delayed
                 def process_overnight_file(filepath):
-                    try:
-                        df = pd.read_csv(filepath, sep='|')
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'zona_residencia': 'residence_area',
-                            'zona_pernoctacion': 'overnight_stay_area',
-                            'personas': 'people'
-                        }, inplace=True)
+                    return self._process_single_overnight_file(filepath)
 
-                        if len(df) > 0:
-                            tmp_date = str(df.iloc[0]['date'])
-                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
-                        return df
-                    except Exception as e:
-                        print(f"Error processing {filepath}: {e}")
-                        return None
-                
                 delayed_tasks = [process_overnight_file(f) for f in local_list]
                 processed_dfs = dd.compute(*delayed_tasks)
-                valid_dfs = [df for df in processed_dfs if df is not None]
-                
-                if valid_dfs:
-                    df = pd.concat(valid_dfs, ignore_index=True)
-                else:
-                    return None
             else:
-                # Original pandas processing
+                processed_dfs = []
                 for f in tqdm.tqdm(local_list):
-                    try:
-                        df = pd.read_csv(f, sep='|')
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'zona_residencia': 'residence_area',
-                            'zona_pernoctacion': 'overnight_stay_area',
-                            'personas': 'people'
-                        }, inplace=True)
+                    result = self._process_single_overnight_file(f)
+                    if result is not None:
+                        processed_dfs.append(result)
 
-                        tmp_date = str(df.loc[0]['date'])
-                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                        df['date'] = new_date
+            valid_dfs = [df for df in processed_dfs if df is not None]
+            if not valid_dfs:
+                print("No valid data found")
+                return None
 
-                        temp_dfs.append(df)
-                    except Exception as e:
-                        print(f"Error processing file: {e}")
-                        continue
-
-                print('Concatenating all the dataframes....')
-                df = pd.concat(temp_dfs) if temp_dfs else None
-                
-            if df is not None:
-                self._saving_parquet(df, m_type)
-                if return_df:
-                    return df
+            print('Concatenating all the dataframes....')
+            df = pd.concat(valid_dfs, ignore_index=True)
+            df = self._finalize_backend_dataframe(df)
+            self._saving_parquet(df, m_type)
+            if return_df:
+                return df
 
         elif self.version == 1:
             raise Exception('Overnight stays data is not available for version 1. Please use version 2.')
@@ -475,148 +813,64 @@ class Mobility:
         if self.version == 2:
             m_type = 'Personas'
             local_list = self._donwload_helper(m_type)
-            temp_dfs = []
             print('Generating parquet file for Number of Trips....')
-            
-            if self.use_dask and len(local_list) > 1:  # multiple files
-                # Use Dask for larger datasets
+
+            if self.use_dask and len(local_list) > 1:
                 @delayed
                 def process_trips_file(filepath):
-                    try:
-                        df = pd.read_csv(filepath, sep='|')
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'zona_pernoctacion': 'overnight_stay_area',
-                            'edad': 'age',
-                            'sexo': 'gender',
-                            'numero_viajes': 'number_of_trips',
-                            'personas': 'people'
-                        }, inplace=True)
+                    return self._process_single_number_of_trips_file(filepath)
 
-                        df.replace({"gender":
-                                        {'hombre': 'male',
-                                         'mujer': 'female'}},
-                                   inplace=True
-                                   )
-
-                        if len(df) > 0:
-                            tmp_date = str(df.iloc[0]['date'])
-                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
-                        return df
-                    except Exception as e:
-                        print(f"Error processing {filepath}: {e}")
-                        return None
-                
                 delayed_tasks = [process_trips_file(f) for f in local_list]
                 processed_dfs = dd.compute(*delayed_tasks)
-                valid_dfs = [df for df in processed_dfs if df is not None]
-                
-                if valid_dfs:
-                    df = pd.concat(valid_dfs, ignore_index=True)
-                else:
-                    return None
             else:
-                # Original pandas processing
+                processed_dfs = []
                 for f in tqdm.tqdm(local_list):
-                    try:
-                        df = pd.read_csv(f, sep='|')
+                    result = self._process_single_number_of_trips_file(f)
+                    if result is not None:
+                        processed_dfs.append(result)
 
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'zona_pernoctacion': 'overnight_stay_area',
-                            'edad': 'age',
-                            'sexo': 'gender',
-                            'numero_viajes': 'number_of_trips',
-                            'personas': 'people'
-                        }, inplace=True)
+            valid_dfs = [df for df in processed_dfs if df is not None]
+            if not valid_dfs:
+                print("No valid data found")
+                return None
 
-                        df.replace({"gender":
-                                        {'hombre': 'male',
-                                         'mujer': 'female'}},
-                                   inplace=True
-                                   )
+            print('Concatenating all the dataframes....')
+            df = pd.concat(valid_dfs, ignore_index=True)
+            df = self._finalize_backend_dataframe(df)
+            self._saving_parquet(df, m_type)
+            if return_df:
+                return df
 
-                        tmp_date = str(df.loc[0]['date'])
-                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                        df['date'] = new_date
-
-                        temp_dfs.append(df)
-                    except Exception as e:
-                        print(f"Error processing file: {e}")
-                        continue
-
-                print('Concatenating all the dataframes....')
-                df = pd.concat(temp_dfs) if temp_dfs else None
-
-            if df is not None:
-                self._saving_parquet(df, m_type)
-                if return_df:
-                    return df
-                
         if self.version == 1:
             m_type = 'maestra2'
             local_list = self._donwload_helper(m_type)
-            temp_dfs = []
             print('Generating parquet file for Number of Trips....')
 
-            if self.use_dask and len(local_list) > 1:  # multiple files
-                # Use Dask for larger datasets
+            if self.use_dask and len(local_list) > 1:
                 @delayed
                 def process_trips_file(filepath):
-                    try:
-                        df = pd.read_csv(filepath, sep='|')
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'distrito': 'overnight_stay_area',
-                            'numero_viajes': 'number_of_trips',
-                            'personas': 'people'
-                        }, inplace=True)
-
-                        if len(df) > 0:
-                            tmp_date = str(df.iloc[0]['date'])
-                            df['date'] = f"{tmp_date[:4]}-{tmp_date[4:6]}-{tmp_date[6:8]}"
-                        return df
-                    except Exception as e:
-                        print(f"Error processing {filepath}: {e}")
-                        return None
+                    return self._process_single_number_of_trips_file(filepath)
 
                 delayed_tasks = [process_trips_file(f) for f in local_list]
                 processed_dfs = dd.compute(*delayed_tasks)
-                valid_dfs = [df for df in processed_dfs if df is not None]
-
-                if valid_dfs:
-                    df = pd.concat(valid_dfs, ignore_index=True)
-                else:
-                    return None
             else:
-                # Original pandas processing
+                processed_dfs = []
                 for f in tqdm.tqdm(local_list):
-                    try:
-                        df = pd.read_csv(f, sep='|')
+                    result = self._process_single_number_of_trips_file(f)
+                    if result is not None:
+                        processed_dfs.append(result)
 
-                        df.rename(columns={
-                            'fecha': 'date',
-                            'distrito': 'overnight_stay_area',
-                            'numero_viajes': 'number_of_trips',
-                            'personas': 'people'
-                        }, inplace=True)
+            valid_dfs = [df for df in processed_dfs if df is not None]
+            if not valid_dfs:
+                print("No valid data found")
+                return None
 
-                        tmp_date = str(df.loc[0]['date'])
-                        new_date = tmp_date[0:4] + '-' + tmp_date[4:6] + '-' + tmp_date[6:8]
-                        df['date'] = new_date
-
-                        temp_dfs.append(df)
-                    except Exception as e:
-                        print(f"Error processing file: {e}")
-                        continue
-
-                print('Concatenating all the dataframes....')
-                df = pd.concat(temp_dfs) if temp_dfs else None
-
-            if df is not None:
-                self._saving_parquet(df, m_type)
-                if return_df:
-                    return df
+            print('Concatenating all the dataframes....')
+            df = pd.concat(valid_dfs, ignore_index=True)
+            df = self._finalize_backend_dataframe(df)
+            self._saving_parquet(df, m_type)
+            if return_df:
+                return df
 
         return None
 
@@ -644,7 +898,8 @@ class Mobility:
                 try:
                     utils.download_file_if_not_existing(download_url,os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
                     local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
-                except:
+                except Exception as exc:
+                    print(f"[warn] Failed to download {download_url}: {exc}")
                     continue
         elif self.version == 1:
 
@@ -658,6 +913,7 @@ class Mobility:
                     url_base = f"https://opendata-movilidad.mitma.es/{m_type}-mitma-{self.zones}/ficheros-diarios/{d_first}/{d_second}_{m_type[:-1]}_{m_type[-1]}_mitma_{self.zones[:-1]}.txt.gz"
                     utils.download_file_if_not_existing(url_base, os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
                     local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
-                except:
+                except Exception as exc:
+                    print(f"[warn] Failed to download {url_base}: {exc}")
                     continue
         return local_list
