@@ -189,3 +189,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 >>>>>>> c806c31165fb344bf96304b4d2d700ba748b3ed9
+
+# Local personal experiments
+.venv-test/
+experiments/
+experiments_data/

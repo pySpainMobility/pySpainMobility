@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from shapely.geometry import Point
 
+import pyspainmobility.mobility.mobility as mobility_module
 from pyspainmobility.mobility.mobility import Mobility
 from pyspainmobility.utils import utils
 from pyspainmobility.zones.zones import Zones
@@ -250,6 +251,49 @@ def test_backend_validation_rejects_unknown_backend(monkeypatch, tmp_path):
             output_directory=str(tmp_path / "custom_out"),
             backend="invalid",
         )
+
+
+def test_arrow_backend_falls_back_to_pandas_when_pyarrow_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "zone_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "version_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "date_format_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "get_dates_between", lambda *_: ["2022-01-01"])
+    monkeypatch.setattr(utils, "get_valid_dates", lambda *_: ["2022-01-01", "2022-01-02"])
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+    monkeypatch.setattr(mobility_module, "pa", None)
+    monkeypatch.setattr(mobility_module, "pacsv", None)
+
+    with pytest.warns(RuntimeWarning, match="Falling back to backend='pandas'"):
+        mobility = Mobility(
+            version=2,
+            zones="municipalities",
+            start_date="2022-01-01",
+            end_date="2022-01-01",
+            output_directory=str(tmp_path / "custom_out"),
+            backend="arrow",
+        )
+
+    assert mobility.backend == "pandas"
+
+
+def test_arrow_parser_falls_back_to_pandas_when_pyarrow_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(mobility_module, "pa", None)
+    monkeypatch.setattr(mobility_module, "pacsv", None)
+
+    file_path = tmp_path / "backend_arrow_missing_pyarrow.csv.gz"
+    content = (
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20220101|00|01001|01009|1|2.5\n"
+    )
+    _write_gzip(file_path, content)
+
+    with pytest.warns(RuntimeWarning, match="Falling back to pandas parser"):
+        df = Mobility._read_pipe_file_arrow(
+            str(file_path),
+            dtype={"origen": "string", "destino": "string"},
+        )
+
+    assert all("[pyarrow]" not in str(dtype) for dtype in df.dtypes)
 
 
 def test_arrow_backend_reads_arrow_dtypes(monkeypatch, tmp_path):

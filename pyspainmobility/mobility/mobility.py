@@ -3,6 +3,7 @@ from pyspainmobility.utils import utils
 import os
 import pandas as pd
 import tqdm
+import warnings
 from os.path import expanduser
 
 # Optional Arrow import – used when backend='arrow'
@@ -46,8 +47,11 @@ class Mobility:
         Whether to use Dask for processing large datasets. Default is False. Requires dask to be installed.
     backend : str
         Dataframe backend used while reading and processing files. Use
-        'arrow' (default) for Apache Arrow-backed pandas columns or
-        'pandas' for classic pandas dtypes.
+        'arrow' (default) for Apache Arrow-backed pandas columns
+        (typically faster and more memory-efficient) or 'pandas' for
+        classic pandas dtypes. If 'arrow' is requested but pyarrow is not
+        installed, the class automatically falls back to 'pandas' and
+        emits a warning.
     Examples
     --------
     >>> from pyspainmobility import Mobility
@@ -80,7 +84,14 @@ class Mobility:
         if self.backend not in {"arrow", "pandas"}:
             raise ValueError("backend must be either 'arrow' or 'pandas'")
         if self.backend == "arrow" and (pa is None or pacsv is None):
-            raise ImportError("backend='arrow' requires pyarrow to be installed")
+            warnings.warn(
+                "backend='arrow' requested but pyarrow is not installed. "
+                "Falling back to backend='pandas'. Install pyarrow for better "
+                "performance and lower memory usage.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.backend = "pandas"
 
         if self.use_dask and dd is None:
             raise ImportError("Dask is not installed. Please install dask to use use_dask=True")
@@ -171,7 +182,13 @@ class Mobility:
         Falls back to pandas parser if Arrow cannot parse the source.
         """
         if pa is None or pacsv is None:
-            raise ImportError("pyarrow is required for backend='arrow'")
+            warnings.warn(
+                "pyarrow is not available. Falling back to pandas parser. "
+                "Install pyarrow for better performance and lower memory usage.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
 
         column_types = None
         if dtype:
