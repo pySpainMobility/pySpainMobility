@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+      - name: Check version sync (pip/conda)
+        run: |
+          python scripts/check_version_sync.py
       - name: Install dependencies
         run: |
           pip install .[docs]

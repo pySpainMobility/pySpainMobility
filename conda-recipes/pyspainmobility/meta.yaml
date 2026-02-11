@@ -1,5 +1,5 @@
 {% set name = "pyspainmobility" %}
-{% set version = "1.0.3" %}
+{% set version = "1.1.0" %}
 {% set python_min = "3.9" %}
 
 
@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/pyspainmobility-{{ version }}.tar.gz
-  sha256: 42ace12033786e1018af5757117b2e816a9c259d2170d1fccdb761b4bb668838
+  sha256: b7915f3280f659520a32dfe8f2f476c4910a3d0cbc3fb443017672e964e88972
 
 build:
   noarch: python
