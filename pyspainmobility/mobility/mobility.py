@@ -5,6 +5,7 @@ import pandas as pd
 import tqdm
 import warnings
 from os.path import expanduser
+from typing import Optional
 
 # Optional Arrow import – used when backend='arrow'
 try:
@@ -173,7 +174,7 @@ class Mobility:
         return str(name).replace("\ufeff", "").strip().lower()
 
     @staticmethod
-    def _align_dtype_map_to_source_columns(filepath: str, dtype: dict = None) -> dict | None:
+    def _align_dtype_map_to_source_columns(filepath: str, dtype: dict = None) -> Optional[dict]:
         """
         Align dtype mapping keys to real source column names, handling
         BOM/case/whitespace differences before parsing.

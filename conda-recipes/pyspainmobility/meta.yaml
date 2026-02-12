@@ -1,5 +1,5 @@
 {% set name = "pyspainmobility" %}
-{% set version = "1.1.0" %}
+{% set version = "1.1.1" %}
 {% set python_min = "3.9" %}
 
 
@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/pyspainmobility-{{ version }}.tar.gz
-  sha256: b7915f3280f659520a32dfe8f2f476c4910a3d0cbc3fb443017672e964e88972
+  sha256: 384e60cf7a6cedf20769d3f4b263adc1b703712f1cc28d5b88c4819671e896a9
 
 build:
   noarch: python
@@ -28,7 +28,7 @@ requirements:
     - tqdm >=4.0.0
     - matplotlib-base >=3.0.0
     - pyarrow >=8.0.0
-    - dask-core >=2024.0
+    - dask >=2024.0
 
 test:
   imports:

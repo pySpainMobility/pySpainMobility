@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.1] - 2026-02-12
+
+### Fixed
+- Python 3.9 compatibility issue in type annotations (`dict | None` replaced with `Optional[dict]`).
+
+### Changed
+- Conda runtime dependency updated from `dask-core` to `dask` to avoid future `dask-expr` import issues.
+
 ## [1.1.0] - 2026-02-11
 
 ### Added
