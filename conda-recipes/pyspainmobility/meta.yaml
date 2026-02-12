@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/pyspainmobility-{{ version }}.tar.gz
-  sha256: 384e60cf7a6cedf20769d3f4b263adc1b703712f1cc28d5b88c4819671e896a9
+  sha256: bb85e83555dec3124a115119a79bfa2482c25684791d6d384e30496a6fa33577
 
 build:
   noarch: python
