@@ -9,6 +9,10 @@ All notable changes to this project are documented in this file.
 - Added a clearer `RuntimeError` when MITMA date discovery fails due to temporary upstream network/server issues.
 - Fixed `available_mobility_data()` downloaded-file detection to recognize both raw RSS filenames and library-managed versioned files (`_v1`/`_v2`).
 - Added Dask-to-pandas fallback handling for overnight stays and number-of-trips processing paths to match OD behavior.
+- Updated documentation deployment workflow to use official GitHub Pages actions (`upload-pages-artifact` + `deploy-pages`) for more reliable publishing.
+
+### Added
+- Optional live smoke tests (`test_live_pipeline_smoke.py`) to validate real MITMA download/parsing pipelines and guard against value inflation regressions.
 
 ## [1.1.1] - 2026-02-12
 

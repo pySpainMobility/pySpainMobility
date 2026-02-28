@@ -1,9 +1,19 @@
 name: documentation
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   docs:
@@ -14,17 +24,25 @@ jobs:
       - name: Check version sync (pip/conda)
         run: |
           python scripts/check_version_sync.py
-      - name: Install dependencies
+      - name: Install docs dependencies
         run: |
           pip install .[docs]
       - name: Sphinx build
         run: |
-          sphinx-build docs _build
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+          sphinx-build -b html docs _build/html
+      - name: Upload Pages artifact
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-pages-artifact@v3
         with:
-          publish_branch: gh-pages
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: _build/
-          force_orphan: true
+          path: _build/html
+
+  deploy:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: docs
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

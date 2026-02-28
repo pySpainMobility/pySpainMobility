@@ -10,6 +10,7 @@ Use this checklist for every release so pip and conda stay aligned.
    - `python scripts/check_version_sync.py`
 3. Run tests:
    - `pytest -q`
+   - Optional live smoke test (real MITMA download/parsing pipeline): `PYSPAINMOBILITY_RUN_LIVE_TESTS=1 pytest -q test_live_pipeline_smoke.py`
 4. Build and validate PyPI artifacts:
    - `python -m build`
    - `python -m twine check dist/*`
@@ -25,3 +26,7 @@ Use this checklist for every release so pip and conda stay aligned.
 9. Verify published versions:
    - `python -c "import json,urllib.request as u;print(json.load(u.urlopen('https://pypi.org/pypi/pyspainmobility/json'))['info']['version'])"`
    - `conda search -c pyspainmobility pyspainmobility`
+10. Verify docs website:
+    - Ensure repository Settings > Pages is configured to "GitHub Actions"
+    - Confirm latest `documentation` workflow finished with deploy success
+    - Open `https://pyspainmobility.github.io/pySpainMobility/`
