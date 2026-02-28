@@ -77,6 +77,143 @@ def test_available_mobility_data_marks_existing_file_as_downloaded(monkeypatch, 
     assert Path(df.iloc[0]["local_path"]) == existing_file
 
 
+def test_available_mobility_data_detects_versioned_v2_downloaded_file(monkeypatch, tmp_path):
+    filename = "20230101_Viajes_municipios.csv.gz"
+    versioned = tmp_path / "20230101_Viajes_municipios_v2.csv.gz"
+    versioned.write_bytes(b"versioned v2")
+
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item>
+      <title>{filename}</title>
+      <link>https://example.org/{filename}</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
+
+    df = utils.available_mobility_data(version=2)
+
+    assert len(df) == 1
+    assert bool(df.iloc[0]["downloaded"]) is True
+    assert Path(df.iloc[0]["local_path"]) == versioned
+
+
+def test_available_mobility_data_detects_versioned_v1_downloaded_file(monkeypatch, tmp_path):
+    filename = "20200311_maestra_1_mitma_municipio.txt.gz"
+    versioned = tmp_path / "20200311_maestra_1_mitma_municipio_v1.txt.gz"
+    versioned.write_bytes(b"versioned v1")
+
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item>
+      <title>{filename}</title>
+      <link>https://example.org/{filename}</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
+
+    df = utils.available_mobility_data(version=1)
+
+    assert len(df) == 1
+    assert bool(df.iloc[0]["downloaded"]) is True
+    assert Path(df.iloc[0]["local_path"]) == versioned
+
+
+def test_available_mobility_data_prefers_raw_name_over_versioned(monkeypatch, tmp_path):
+    filename = "20230101_Viajes_municipios.csv.gz"
+    raw = tmp_path / filename
+    raw.write_bytes(b"raw")
+    versioned = tmp_path / "20230101_Viajes_municipios_v2.csv.gz"
+    versioned.write_bytes(b"versioned")
+
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item>
+      <title>{filename}</title>
+      <link>https://example.org/{filename}</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
+
+    df = utils.available_mobility_data(version=2)
+
+    assert len(df) == 1
+    assert bool(df.iloc[0]["downloaded"]) is True
+    assert Path(df.iloc[0]["local_path"]) == raw
+
+
+def test_available_mobility_data_reports_false_when_no_file_present(monkeypatch, tmp_path):
+    filename = "20230102_Viajes_municipios.csv.gz"
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item>
+      <title>{filename}</title>
+      <link>https://example.org/{filename}</link>
+      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
+
+    df = utils.available_mobility_data(version=2)
+
+    assert len(df) == 1
+    assert bool(df.iloc[0]["downloaded"]) is False
+    assert df.iloc[0]["local_path"] is None
+
+
+def test_available_mobility_data_multi_entry_mixed_download_status(monkeypatch, tmp_path):
+    f1 = "20230101_Viajes_municipios.csv.gz"
+    f2 = "20230102_Viajes_municipios.csv.gz"
+    f3 = "20230103_Viajes_municipios.csv.gz"
+    (tmp_path / "20230101_Viajes_municipios_v2.csv.gz").write_bytes(b"v2")
+    (tmp_path / f3).write_bytes(b"raw")
+
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss>
+  <channel>
+    <item><title>{f1}</title><link>https://example.org/{f1}</link><pubDate>x</pubDate></item>
+    <item><title>{f2}</title><link>https://example.org/{f2}</link><pubDate>x</pubDate></item>
+    <item><title>{f3}</title><link>https://example.org/{f3}</link><pubDate>x</pubDate></item>
+  </channel>
+</rss>
+""".encode("utf-8")
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
+
+    df = utils.available_mobility_data(version=2).sort_values("data_ymd").reset_index(drop=True)
+
+    assert bool(df.loc[0, "downloaded"]) is True
+    assert str(df.loc[0, "local_path"]).endswith("_v2.csv.gz")
+    assert bool(df.loc[1, "downloaded"]) is False
+    assert df.loc[1, "local_path"] is None
+    assert bool(df.loc[2, "downloaded"]) is True
+    assert str(df.loc[2, "local_path"]).endswith("20230103_Viajes_municipios.csv.gz")
+
+
 def test_available_zoning_data_rejects_luas_for_version1():
     with pytest.raises(Exception, match="not a valid zone for version 1"):
         utils.available_zoning_data(version=1, zone="gaus")

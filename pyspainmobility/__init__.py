@@ -1,4 +1,4 @@
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 from .mobility.mobility import Mobility  # noqa
 from .zones.zones import Zones  # noqa

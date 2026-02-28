@@ -44,11 +44,24 @@ def available_mobility_data(version: int = 2) -> pd.DataFrame:
                 date_ym = None
                 date_ymd = None
 
-            # check if the file is already downloaded in the data directory
+            # Check both the raw RSS filename and the library's internal
+            # versioned filename pattern (e.g. *_v2.csv.gz).
             local_path = os.path.join(data_directory, tmp_date)
+            local_path_versioned = None
+            for ext in (".csv.gz", ".txt.gz"):
+                if tmp_date.endswith(ext):
+                    stem = tmp_date[: -len(ext)]
+                    local_path_versioned = os.path.join(
+                        data_directory, f"{stem}_v{version}{ext}"
+                    )
+                    break
+
             if os.path.exists(local_path):
                 downloaded = True
                 valid_path = local_path
+            elif local_path_versioned and os.path.exists(local_path_versioned):
+                downloaded = True
+                valid_path = local_path_versioned
             else:
                 downloaded = False
                 valid_path = None

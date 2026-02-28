@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.2] - 2026-02-28
+
+### Fixed
+- Prevented decimal inflation in OD/overnight/number-of-trips parsing by using numeric parsing with conditional thousands stripping instead of forced dot compaction.
+- Added a clearer `RuntimeError` when MITMA date discovery fails due to temporary upstream network/server issues.
+- Fixed `available_mobility_data()` downloaded-file detection to recognize both raw RSS filenames and library-managed versioned files (`_v1`/`_v2`).
+- Added Dask-to-pandas fallback handling for overnight stays and number-of-trips processing paths to match OD behavior.
+
 ## [1.1.1] - 2026-02-12
 
 ### Fixed
