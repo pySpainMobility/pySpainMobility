@@ -19,6 +19,7 @@ def _build_mobility(
     zones="municipalities",
     start_date=None,
     end_date=None,
+    use_dask=False,
 ):
     if start_date is None:
         start_date = "2022-01-01" if version == 2 else "2020-03-11"
@@ -46,9 +47,44 @@ def _build_mobility(
         end_date=end_date,
         output_directory=str(tmp_path / "custom_out"),
         backend=backend,
+        use_dask=use_dask,
     )
     monkeypatch.setattr(mobility, "_saving_parquet", lambda *_: None)
     return mobility
+
+
+class _FakeDaskCompute:
+    @staticmethod
+    def compute(*_args, **_kwargs):
+        raise RuntimeError("injected dask failure")
+
+
+def _build_mobility_dask(
+    monkeypatch,
+    tmp_path,
+    version=2,
+    zones="municipalities",
+    start_date=None,
+    end_date=None,
+):
+    monkeypatch.setattr(mobility_module, "dd", _FakeDaskCompute())
+
+    def _fake_delayed(func):
+        def _wrapper(*args, **kwargs):
+            return (func, args, kwargs)
+        return _wrapper
+
+    monkeypatch.setattr(mobility_module, "delayed", _fake_delayed)
+    return _build_mobility(
+        monkeypatch,
+        tmp_path,
+        backend="pandas",
+        version=version,
+        zones=zones,
+        start_date=start_date,
+        end_date=end_date,
+        use_dask=True,
+    )
 
 
 def _write_gzip(path, content):
@@ -85,6 +121,29 @@ def test_mobility_init_raises_clear_error_when_valid_dates_unavailable(monkeypat
     monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
 
     with pytest.raises(RuntimeError, match="Could not resolve valid dates"):
+        Mobility(
+            version=2,
+            zones="municipalities",
+            start_date="2022-01-01",
+            end_date="2022-01-01",
+            output_directory=str(tmp_path / "custom_out"),
+            backend="pandas",
+        )
+
+
+def test_mobility_init_raises_friendly_runtime_error_on_network_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils, "zone_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "version_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "date_format_assert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(utils, "get_dates_between", lambda *_: ["2022-01-01"])
+    monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
+
+    def _raise_network(*_args, **_kwargs):
+        raise RuntimeError("HTTP Error 500: Internal Server Error")
+
+    monkeypatch.setattr(utils, "get_valid_dates", _raise_network)
+
+    with pytest.raises(RuntimeError, match="Could not reach the MITMA open-data server"):
         Mobility(
             version=2,
             zones="municipalities",
@@ -278,7 +337,7 @@ def test_get_overnight_stays_data_normalizes_headers_and_ids(monkeypatch, tmp_pa
     assert list(df.columns) == ["date", "residence_area", "overnight_stay_area", "people"]
     assert df.loc[0, "residence_area"] == "01001"
     assert df.loc[0, "overnight_stay_area"] == "01009"
-    assert df.loc[0, "people"] == 2214577
+    assert df.loc[0, "people"] == pytest.approx(2214.577)
 
 
 def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch, tmp_path):
@@ -298,7 +357,7 @@ def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch,
     assert list(df.columns) == ["date", "overnight_stay_area", "age", "gender", "number_of_trips", "people"]
     assert df.loc[0, "overnight_stay_area"] == "01001"
     assert df.loc[0, "gender"] == "female"
-    assert df.loc[0, "people"] == 128457
+    assert df.loc[0, "people"] == pytest.approx(128.457)
 
 
 def test_numeric_parser_removes_unambiguous_dot_grouping_separators():
@@ -316,7 +375,7 @@ def test_mitma_integer_parser_matches_blog_style_conversion():
     assert converted.tolist() == [1, 2214577, 56400, 128457, 1234567, 2]
 
 
-def test_process_single_od_file_compacts_dot_grouped_flow_sizes(monkeypatch, tmp_path):
+def test_process_single_od_file_preserves_decimal_flow_sizes(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path)
 
     file_path = tmp_path / "od_dot_grouped.csv.gz"
@@ -327,8 +386,8 @@ def test_process_single_od_file_compacts_dot_grouped_flow_sizes(monkeypatch, tmp
     _write_gzip(file_path, content)
 
     df = mobility._process_single_od_file(str(file_path), keep_activity=False, social_agg=False)
-    assert df.loc[0, "n_trips"] == 10098
-    assert df.loc[0, "trips_total_length_km"] == 39969
+    assert df.loc[0, "n_trips"] == pytest.approx(10.098)
+    assert df.loc[0, "trips_total_length_km"] == pytest.approx(39.969)
 
 
 def test_backend_validation_rejects_unknown_backend(monkeypatch, tmp_path):
@@ -589,9 +648,76 @@ def test_get_number_of_trips_data_version1_adds_demographic_columns(monkeypatch,
     assert df.loc[0, "date"] == "2020-03-11"
     assert df.loc[0, "overnight_stay_area"] == "01001"
     assert df.loc[0, "number_of_trips"] == "2"
-    assert df.loc[0, "people"] == 1234
+    assert df.loc[0, "people"] == pytest.approx(1.234)
     assert pd.isna(df.loc[0, "age"])
     assert pd.isna(df.loc[0, "gender"])
+
+
+def test_dask_fallback_overnight_stays_returns_correct_data(monkeypatch, tmp_path):
+    mobility = _build_mobility_dask(monkeypatch, tmp_path, version=2)
+
+    f1 = tmp_path / "overnight_dask_1.csv.gz"
+    f2 = tmp_path / "overnight_dask_2.csv.gz"
+    content = (
+        "fecha|zona_residencia|zona_pernoctacion|personas\n"
+        "20220101|01001|01009|56.789\n"
+    )
+    _write_gzip(f1, content)
+    _write_gzip(f2, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(f1), str(f2)])
+
+    df = mobility.get_overnight_stays_data(return_df=True)
+
+    assert len(df) == 2
+    assert set(df.columns) == {"date", "residence_area", "overnight_stay_area", "people"}
+    assert all(val == pytest.approx(56.789) for val in df["people"].tolist())
+
+
+def test_dask_fallback_number_of_trips_v2_returns_correct_data(monkeypatch, tmp_path):
+    mobility = _build_mobility_dask(monkeypatch, tmp_path, version=2)
+
+    f1 = tmp_path / "trips_v2_dask_1.csv.gz"
+    f2 = tmp_path / "trips_v2_dask_2.csv.gz"
+    content = (
+        "fecha|zona_pernoctacion|edad|sexo|numero_viajes|personas\n"
+        "20220101|01001|25-45|hombre|2+|128.457\n"
+    )
+    _write_gzip(f1, content)
+    _write_gzip(f2, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(f1), str(f2)])
+
+    df = mobility.get_number_of_trips_data(return_df=True)
+
+    assert len(df) == 2
+    assert set(df.columns) == {"date", "overnight_stay_area", "age", "gender", "number_of_trips", "people"}
+    assert set(df["gender"]) == {"male"}
+    assert all(val == pytest.approx(128.457) for val in df["people"].tolist())
+
+
+def test_dask_fallback_number_of_trips_v1_returns_correct_data(monkeypatch, tmp_path):
+    mobility = _build_mobility_dask(
+        monkeypatch,
+        tmp_path,
+        version=1,
+        start_date="2020-03-11",
+        end_date="2020-03-11",
+    )
+
+    f1 = tmp_path / "trips_v1_dask_1.txt.gz"
+    f2 = tmp_path / "trips_v1_dask_2.txt.gz"
+    content = (
+        "fecha|distrito|numero_viajes|personas\n"
+        "20200311|01001|2|1.234\n"
+    )
+    _write_gzip(f1, content)
+    _write_gzip(f2, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(f1), str(f2)])
+
+    df = mobility.get_number_of_trips_data(return_df=True)
+
+    assert len(df) == 2
+    assert set(df.columns) == {"date", "overnight_stay_area", "number_of_trips", "people", "age", "gender"}
+    assert all(val == pytest.approx(1.234) for val in df["people"].tolist())
 
 
 def test_download_helper_logs_warnings_on_failed_download(monkeypatch, tmp_path, capsys):

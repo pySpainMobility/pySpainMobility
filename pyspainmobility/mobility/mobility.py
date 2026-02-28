@@ -120,7 +120,15 @@ class Mobility:
 
         self.dates = utils.get_dates_between(start_date, end_date)
 
-        valid_dates = utils.get_valid_dates(self.version)
+        try:
+            valid_dates = utils.get_valid_dates(self.version)
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not reach the MITMA open-data server while fetching the list of available dates "
+                f"for version {self.version}. This is usually a temporary problem on the government's side "
+                "(e.g. HTTP 500 / service maintenance). Please wait a few minutes and try again. "
+                f"Original error: {exc}"
+            ) from exc
         if not valid_dates:
             raise RuntimeError(
                 f"Could not resolve valid dates for version {self.version}. "
@@ -445,8 +453,8 @@ class Mobility:
         else:
             df["hour"] = df["hour"].astype("string").str.strip()
 
-        df["n_trips"] = self._to_mitma_integer(df["n_trips"])
-        df["trips_total_length_km"] = self._to_mitma_integer(df["trips_total_length_km"])
+        df["n_trips"] = self._to_numeric(df["n_trips"], strip_thousands=True)
+        df["trips_total_length_km"] = self._to_numeric(df["trips_total_length_km"], strip_thousands=True)
 
         df.dropna(
             subset=["date", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
@@ -666,7 +674,7 @@ class Mobility:
             df["date"] = self._normalize_date_series(df["date"])
             df["residence_area"] = self._normalize_identifier_series(df["residence_area"])
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
-            df["people"] = self._to_mitma_integer(df["people"])
+            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
             df.dropna(subset=required_cols, inplace=True)
 
             return df
@@ -737,7 +745,7 @@ class Mobility:
             df["date"] = self._normalize_date_series(df["date"])
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
             df["number_of_trips"] = df["number_of_trips"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
-            df["people"] = self._to_mitma_integer(df["people"])
+            df["people"] = self._to_numeric(df["people"], strip_thousands=True)
 
             df.replace({"gender": {"hombre": "male", "mujer": "female"}}, inplace=True)
             df.dropna(subset=["date", "overnight_stay_area", "number_of_trips", "people"], inplace=True)
@@ -785,7 +793,15 @@ class Mobility:
                     return self._process_single_overnight_file(filepath)
 
                 delayed_tasks = [process_overnight_file(f) for f in local_list]
-                processed_dfs = dd.compute(*delayed_tasks)
+                try:
+                    processed_dfs = dd.compute(*delayed_tasks)
+                except Exception as e:
+                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
+                    processed_dfs = []
+                    for f in tqdm.tqdm(local_list):
+                        result = self._process_single_overnight_file(f)
+                        if result is not None:
+                            processed_dfs.append(result)
             else:
                 processed_dfs = []
                 for f in tqdm.tqdm(local_list):
@@ -844,7 +860,15 @@ class Mobility:
                     return self._process_single_number_of_trips_file(filepath)
 
                 delayed_tasks = [process_trips_file(f) for f in local_list]
-                processed_dfs = dd.compute(*delayed_tasks)
+                try:
+                    processed_dfs = dd.compute(*delayed_tasks)
+                except Exception as e:
+                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
+                    processed_dfs = []
+                    for f in tqdm.tqdm(local_list):
+                        result = self._process_single_number_of_trips_file(f)
+                        if result is not None:
+                            processed_dfs.append(result)
             else:
                 processed_dfs = []
                 for f in tqdm.tqdm(local_list):
@@ -875,7 +899,15 @@ class Mobility:
                     return self._process_single_number_of_trips_file(filepath)
 
                 delayed_tasks = [process_trips_file(f) for f in local_list]
-                processed_dfs = dd.compute(*delayed_tasks)
+                try:
+                    processed_dfs = dd.compute(*delayed_tasks)
+                except Exception as e:
+                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
+                    processed_dfs = []
+                    for f in tqdm.tqdm(local_list):
+                        result = self._process_single_number_of_trips_file(f)
+                        if result is not None:
+                            processed_dfs.append(result)
             else:
                 processed_dfs = []
                 for f in tqdm.tqdm(local_list):
