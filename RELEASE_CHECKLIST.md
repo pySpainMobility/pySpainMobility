@@ -25,7 +25,7 @@ Use this checklist for every release so pip and conda stay aligned.
    - `anaconda upload /home/ciro/miniconda3/conda-bld/noarch/pyspainmobility-X.Y.Z-py_0.conda`
 9. Verify published versions:
    - `python -c "import json,urllib.request as u;print(json.load(u.urlopen('https://pypi.org/pypi/pyspainmobility/json'))['info']['version'])"`
-   - `conda search -c pyspainmobility pyspainmobility`
+   - `conda search -c conda-forge pyspainmobility`
 10. Verify docs website:
     - Ensure repository Settings > Pages is configured to "GitHub Actions"
     - Confirm latest `documentation` workflow finished with deploy success
