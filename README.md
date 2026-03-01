@@ -59,7 +59,7 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
 3. Install `pySpainMobility`
 
-        conda install -c pyspainmobility pyspainmobility
+        conda install -c conda-forge pyspainmobility
 
 <a id='examples'></a>
 ## Examples

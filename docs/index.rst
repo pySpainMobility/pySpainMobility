@@ -38,8 +38,8 @@ Installation
 ==========================
 .. code-block:: bash
 
-   # Using conda 
-   conda install -c pyspainmobility pyspainmobility
+   # Using conda
+   conda install -c conda-forge pyspainmobility
 
    # pip installation
    pip install pyspainmobility
