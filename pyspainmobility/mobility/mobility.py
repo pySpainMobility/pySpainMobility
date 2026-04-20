@@ -470,14 +470,18 @@ class Mobility:
                 "activity_origin": {
                     "casa": "home",
                     "frecuente": "other_frequent",
+                    "trabajo": "work_or_study",
                     "trabajo_estudio": "work_or_study",
                     "no_frecuente": "other_non_frequent",
+                    "otros": "other"
                 },
                 "activity_destination": {
                     "casa": "home",
                     "frecuente": "other_frequent",
+                    "trabajo": "work_or_study",
                     "trabajo_estudio": "work_or_study",
                     "no_frecuente": "other_non_frequent",
+                    "otros": "other"
                 },
                 "gender": {"hombre": "male", "mujer": "female"},
             },
@@ -572,11 +576,11 @@ class Mobility:
 
             if self.use_dask:
                 # Use Dask for processing
-                return self._process_od_data_dask(local_list, m_type, False, False, return_df)
+                return self._process_od_data_dask(local_list, m_type, keep_activity, False, return_df)
             else:
                 # Original pandas processing using extracted method
                 for f in tqdm.tqdm(local_list):
-                    result = self._process_single_od_file(f, False, False)
+                    result = self._process_single_od_file(f, keep_activity, False)
                     if result is not None:
                         temp_dfs.append(result)
 
