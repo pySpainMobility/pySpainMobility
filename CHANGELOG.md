@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.0.0] - 2026-09-22
+
+This major release introduces an auditable sparse-network analysis API and
+makes Polars the preferred processing backend. Review code that relies on the
+legacy default backend or treats territorial relations as arbitrary one-to-one
+lookups before upgrading.
+
+### Added
+- Lazy/streaming Polars backend via `Mobility(backend="polars")`, installed with the base package.
+- Automatic backend selection via the new `backend="auto"` default, preferring Polars, then Arrow, then pandas.
+- `pyspainmobility.network`: auditable, directed CSR mobility networks with a stable node index and an optional NetworkX adapter (`pyspainmobility[network]`).
+- Lazy temporal network snapshots with shared node IDs and explicit source/data coverage manifests.
+- Spatial aggregation for OD data (Polars) and existing CSR networks (`P.T @ A @ P`) with complete-mapping validation and internalized-flow audits.
+- `NodeIndex` contracts with optional zoning identifier/version, safe matrix alignment, and propagation through static, temporal, and spatial networks.
+- Date-level pre-filter acquisition manifests from `Mobility`, consumable by temporal networks to distinguish failed/empty source files from zero-flow snapshots.
+- `TemporalMobilityNetwork.sum_network()` and `mean_per_observed_day()` with an explicit observed-day denominator and temporal provenance.
+- Optional CSR-native Infomap adapter (`pyspainmobility[infomap]`) with explicit directed semantics and reproducible, backend-neutral community partitions.
+- Sparse node-strength, edge-change, destination-profile, and pairwise network-comparison metrics, also available through temporal snapshots.
+- Explicit `sum`, `mean`, `max`, and `mutual` directed-to-undirected transformations with non-double-counted logical-flow accounting.
+- Bounded LRU snapshot caching and Hive-partitioned Parquet dataset input for temporal networks, including partition-prunable date filters.
+- Python-version test matrix and optional network-adapter CI checks.
+
+### Changed
+- OD, overnight-stay, and number-of-trips inputs can now be processed as one lazy multi-file Polars plan.
+- Polars writes Parquet directly when `return_df=False`, avoiding an intermediate pandas DataFrame.
+- Temporal snapshots attach provenance during CSR construction, avoiding a second full matrix copy.
+
+### Fixed
+- Normalized cached and freshly built `Zones` geometries to the same string
+  `id` index contract.
+- Added validated relation-to-network mappings: duplicate identical relations
+  are safe, while missing or ambiguous targets now fail explicitly instead of
+  silently selecting a correspondence. Added a district-to-province helper
+  based on INE municipality codes.
+- Preserved OD flows with missing demographic dimensions when `social_agg=True`.
+- Made dot-thousands parsing row-local, so Polars and pandas results no longer depend on which other files are processed in the same batch.
+- Aligned Date, Datetime, and pandas timestamps in temporal networks; period aggregation now scans selected OD rows once.
+- Corrected undirected spatial flow accounting, source self-loop policies, custom weight labels, and provenance through composed transformations.
+- Excluded acquired but invalid OD files from observed-day denominators using per-file parse status.
+- Corrected empty-network cosine similarity and validated canonical sparse-matrix invariants.
+- Removed repeated Infomap node-name copies and included direction in its network fingerprint.
+- Kept ISO timestamp strings in their calendar-day snapshots, rejected malformed date strings, and retained Hive partition pruning.
+- Made undirected audit records JSON-serialisable and preserved read-only network storage across pickle round trips.
+- Prevented partially parsed source days from silently entering temporal averages; callers can now explicitly exclude their remaining OD rows.
+- Preserved initial construction accounting through temporal, spatial, and undirected transformations.
+- Rejected impossible ISO clock values, stabilised cosine metrics for extreme finite weights, and canonicalised harmless floating-point asymmetry after sparse projections.
+
 ## [1.1.2] - 2026-02-28
 
 ### Fixed
