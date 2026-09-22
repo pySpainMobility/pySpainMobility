@@ -479,8 +479,10 @@ class Mobility:
             separator="|",
             encoding="utf8-lossy",
             infer_schema=False,
-            null_values=["NA", "nan", "None"],
-            empty_string_is_null=True,
+            # ``empty_string_is_null`` was introduced after the last Polars
+            # release supporting Python 3.9.  Listing the empty token as a
+            # null value preserves the same parsing contract across both APIs.
+            null_values=["", "NA", "nan", "None"],
             with_column_names=lambda columns: [
                 Mobility._normalize_column_name(column) for column in columns
             ],
