@@ -1,4 +1,5 @@
 import gzip
+from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
@@ -7,6 +8,7 @@ from shapely.geometry import Point
 
 import pyspainmobility.mobility.mobility as mobility_module
 from pyspainmobility.mobility.mobility import Mobility
+from pyspainmobility.network import aggregate_network, build_network
 from pyspainmobility.utils import utils
 from pyspainmobility.zones.zones import Zones
 
@@ -320,8 +322,13 @@ def test_process_single_od_file_normalizes_bom_headers_and_float_like_ids(monkey
     assert df.loc[0, "id_destination"] == "01009"
 
 
-def test_get_overnight_stays_data_normalizes_headers_and_ids(monkeypatch, tmp_path):
-    mobility = _build_mobility(monkeypatch, tmp_path)
+@pytest.mark.parametrize("backend", ["arrow", "polars"])
+def test_get_overnight_stays_data_normalizes_headers_and_ids(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
 
     file_path = tmp_path / "overnight_sample.csv.gz"
     content = (
@@ -340,8 +347,13 @@ def test_get_overnight_stays_data_normalizes_headers_and_ids(monkeypatch, tmp_pa
     assert df.loc[0, "people"] == pytest.approx(2214.577)
 
 
-def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch, tmp_path):
-    mobility = _build_mobility(monkeypatch, tmp_path)
+@pytest.mark.parametrize("backend", ["arrow", "polars"])
+def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
 
     file_path = tmp_path / "trips_sample.csv.gz"
     content = (
@@ -360,12 +372,20 @@ def test_get_number_of_trips_data_normalizes_headers_ids_and_gender(monkeypatch,
     assert df.loc[0, "people"] == pytest.approx(128.457)
 
 
-def test_numeric_parser_removes_unambiguous_dot_grouping_separators():
+def test_numeric_parser_is_row_local_and_matches_polars():
     converted = Mobility._to_numeric(pd.Series(["1.234.567", "2.000"]), strip_thousands=True)
-    assert converted.tolist() == [1234567, 2000]
+    assert converted.tolist() == [1234567, 2.0]
 
     unchanged_decimal = Mobility._to_numeric(pd.Series(["128.457"]), strip_thousands=True)
     assert unchanged_decimal.tolist() == [128.457]
+
+    polars_converted = (
+        mobility_module.pl.DataFrame({"value": ["1.234.567", "2.000"]})
+        .select(Mobility._polars_numeric("value", strip_thousands=True).alias("value"))
+        .get_column("value")
+        .to_list()
+    )
+    assert polars_converted == [1234567.0, 2.0]
 
 
 def test_mitma_integer_parser_matches_blog_style_conversion():
@@ -398,7 +418,7 @@ def test_backend_validation_rejects_unknown_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(utils, "get_valid_dates", lambda *_: ["2022-01-01", "2022-01-02"])
     monkeypatch.setattr(utils, "get_data_directory", lambda: str(tmp_path / "default_data"))
 
-    with pytest.raises(ValueError, match="backend must be either 'arrow' or 'pandas'"):
+    with pytest.raises(ValueError, match="backend must be one of"):
         Mobility(
             version=2,
             zones="municipalities",
@@ -430,6 +450,46 @@ def test_arrow_backend_falls_back_to_pandas_when_pyarrow_is_missing(monkeypatch,
         )
 
     assert mobility.backend == "pandas"
+
+
+def test_polars_backend_explains_missing_base_dependency(monkeypatch, tmp_path):
+    monkeypatch.setattr(mobility_module, "pl", None)
+
+    with pytest.raises(ImportError, match="base dependencies"):
+        _build_mobility(monkeypatch, tmp_path, backend="polars")
+
+
+def test_auto_backend_prefers_polars(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="auto")
+
+    assert mobility.requested_backend == "auto"
+    assert mobility.backend == "polars"
+
+
+def test_auto_backend_falls_back_to_arrow_then_pandas(monkeypatch, tmp_path):
+    monkeypatch.setattr(mobility_module, "pl", None)
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="auto")
+    assert mobility.backend == "arrow"
+
+    monkeypatch.setattr(mobility_module, "pa", None)
+    monkeypatch.setattr(mobility_module, "pacsv", None)
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="auto")
+    assert mobility.backend == "pandas"
+
+
+def test_polars_ignores_dask_without_requiring_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(mobility_module, "dd", None)
+    monkeypatch.setattr(mobility_module, "delayed", None)
+
+    with pytest.warns(RuntimeWarning, match="use_dask=True is ignored"):
+        mobility = _build_mobility(
+            monkeypatch,
+            tmp_path,
+            backend="polars",
+            use_dask=True,
+        )
+
+    assert mobility.backend == "polars"
 
 
 def test_arrow_parser_falls_back_to_pandas_when_pyarrow_is_missing(monkeypatch, tmp_path):
@@ -488,6 +548,23 @@ def test_pandas_backend_keeps_classic_pandas_dtypes(monkeypatch, tmp_path):
     assert all("[pyarrow]" not in str(dtype) for dtype in df.dtypes)
 
 
+@pytest.mark.skipif(mobility_module.pl is None, reason="Polars is not installed")
+def test_polars_backend_reads_arrow_backed_pandas(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
+
+    file_path = tmp_path / "backend_polars.csv.gz"
+    content = (
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20220101|00|01001|01009|1|2.5\n"
+    )
+    _write_gzip(file_path, content)
+
+    df = mobility._read_pipe_file(str(file_path))
+
+    assert isinstance(df, pd.DataFrame)
+    assert any("[pyarrow]" in str(dtype) for dtype in df.dtypes)
+
+
 def test_get_od_data_aggregates_when_activity_and_social_not_requested(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
 
@@ -516,11 +593,16 @@ def test_get_od_data_aggregates_when_activity_and_social_not_requested(monkeypat
     assert df.loc[0, "trips_total_length_km"] == 5
 
 
-def test_get_od_data_version1_translates_headers_and_schema(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_get_od_data_version1_translates_headers_and_schema(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
     mobility = _build_mobility(
         monkeypatch,
         tmp_path,
-        backend="pandas",
+        backend=backend,
         version=1,
         start_date="2020-03-11",
         end_date="2020-03-11",
@@ -584,6 +666,104 @@ def test_get_od_data_keeps_activity_and_social_dimensions(monkeypatch, tmp_path)
     assert set(df["gender"]) == {"male", "female"}
 
 
+def test_polars_processes_multiple_od_files_in_one_result(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
+    files = []
+    for date, trips in (("20220101", "1.5"), ("20220102", "2.5")):
+        file_path = tmp_path / f"od_{date}.csv.gz"
+        _write_gzip(
+            file_path,
+            "fecha|periodo|origen|destino|viajes|viajes_km\n"
+            f"{date}|00|01001|01009|{trips}|10\n",
+        )
+        files.append(str(file_path))
+
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: files)
+    saved = {}
+
+    def fake_save(frame, _m_type):
+        saved["is_polars"] = isinstance(frame, mobility_module.pl.DataFrame)
+
+    monkeypatch.setattr(mobility, "_saving_parquet", fake_save)
+    df = mobility.get_od_data(return_df=True)
+
+    assert saved == {"is_polars": True}
+    assert isinstance(df, pd.DataFrame)
+    assert df["date"].tolist() == ["2022-01-01", "2022-01-02"]
+    assert df["n_trips"].sum() == pytest.approx(4.0)
+
+
+def test_polars_return_false_does_not_materialize_pandas(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
+    file_path = tmp_path / "od_native_save.csv.gz"
+    _write_gzip(
+        file_path,
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20220101|00|01001|01009|1|2\n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+    monkeypatch.setattr(
+        mobility,
+        "_polars_to_pandas",
+        lambda *_: pytest.fail("pandas materialization should not occur"),
+    )
+
+    saved = {}
+    monkeypatch.setattr(
+        mobility,
+        "_saving_parquet",
+        lambda frame, _m_type: saved.setdefault(
+            "is_polars", isinstance(frame, mobility_module.pl.DataFrame)
+        ),
+    )
+
+    assert mobility.get_od_data(return_df=False) is None
+    assert saved == {"is_polars": True}
+
+
+def test_saving_parquet_accepts_native_polars_frame(tmp_path):
+    mobility = Mobility.__new__(Mobility)
+    mobility.output_path = str(tmp_path)
+    mobility.zones = "municipalities"
+    mobility.start_date = "2022-01-01"
+    mobility.end_date = "2022-01-01"
+    mobility.version = 2
+    frame = mobility_module.pl.DataFrame({"value": [1, 2]})
+
+    mobility._saving_parquet(frame, "Viajes")
+
+    output = tmp_path / "Viajes_municipalities_2022-01-01_2022-01-01_v2.parquet"
+    assert pd.read_parquet(output)["value"].tolist() == [1, 2]
+
+
+@pytest.mark.parametrize("backend", ["pandas", "arrow", "polars"])
+def test_social_aggregation_preserves_flows_with_missing_demographics(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
+
+    file_path = tmp_path / f"od_social_missing_{backend}.csv.gz"
+    content = (
+        "fecha|periodo|origen|destino|actividad_origen|actividad_destino|residencia|renta|edad|sexo|viajes|viajes_km\n"
+        "20220101|00|01001|01009|casa|frecuente|01|>15|NA|NA|10.5|100.25\n"
+        "20220101|00|01001|01009|casa|frecuente|01|>15|25-44|hombre|20.5|200.75\n"
+    )
+    _write_gzip(file_path, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+
+    df = mobility.get_od_data(social_agg=True, return_df=True)
+
+    assert len(df) == 2
+    assert df["n_trips"].sum() == pytest.approx(31.0)
+    assert df["trips_total_length_km"].sum() == pytest.approx(301.0)
+
+    unknown_demographics = df[df["age"].isna() & df["gender"].isna()]
+    assert len(unknown_demographics) == 1
+    assert unknown_demographics.iloc[0]["n_trips"] == pytest.approx(10.5)
+
+
 def test_get_od_data_return_df_false_still_saves_file(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
 
@@ -623,11 +803,16 @@ def test_get_overnight_stays_data_raises_for_version1(monkeypatch, tmp_path):
         mobility.get_overnight_stays_data()
 
 
-def test_get_number_of_trips_data_version1_adds_demographic_columns(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_get_number_of_trips_data_version1_adds_demographic_columns(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
     mobility = _build_mobility(
         monkeypatch,
         tmp_path,
-        backend="pandas",
+        backend=backend,
         version=1,
         start_date="2020-03-11",
         end_date="2020-03-11",
@@ -735,6 +920,28 @@ def test_download_helper_logs_warnings_on_failed_download(monkeypatch, tmp_path,
     assert "[warn] Failed to download" in captured.out
 
 
+def test_download_helper_records_pre_filter_acquisition_manifest(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
+    mobility.dates = ["2022-01-01", "2022-01-02"]
+
+    def fake_download(_url, local_path):
+        if "20220102" in local_path:
+            raise RuntimeError("upstream unavailable")
+        Path(local_path).write_bytes(b"source content")
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+
+    files = mobility._donwload_helper("Viajes")
+    manifest = mobility.get_acquisition_manifest("Viajes")
+
+    assert len(files) == 1
+    assert manifest["date"].tolist() == ["2022-01-01", "2022-01-02"]
+    assert manifest["status"].tolist() == ["available", "failed"]
+    assert manifest["coverage"].tolist() == ["unverified", "unknown"]
+    assert manifest.loc[0, "local_path"] == files[0]
+    assert "upstream unavailable" in manifest.loc[1, "error"]
+
+
 def test_zone_geodataframe_is_cached_after_first_load(monkeypatch, tmp_path):
     output_dir = tmp_path / "zones_cache"
     output_dir.mkdir()
@@ -813,3 +1020,146 @@ def test_get_zone_relations_version1_returns_sets(monkeypatch, tmp_path):
     assert df.loc["28079_M1", "municipalities"] == {"28079", "28080"}
     assert df.loc["28079_M1", "census_districts"] == {"2807901", "2807902"}
     assert df.loc["28079_M1", "districts_mitma"] == {"D1", "D2"}
+
+
+def test_zone_geodataframe_cache_preserves_id_index_contract(monkeypatch, tmp_path):
+    output_dir = tmp_path / "zones_cache_contract"
+    output_dir.mkdir()
+    cache_path = output_dir / "municipios_2.geojson"
+    cache_path.write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(utils, "available_zoning_data", lambda *_: pd.DataFrame({"link": []}))
+    cached = gpd.GeoDataFrame(
+        {"id": ["01001", "01002"], "name": ["A", "B"], "geometry": [Point(0, 0), Point(1, 1)]},
+        crs="EPSG:4326",
+    )
+    monkeypatch.setattr(gpd, "read_file", lambda *_args, **_kwargs: cached)
+
+    zones = Zones(zones="municipalities", version=2, output_directory=str(output_dir))
+    gdf = zones.get_zone_geodataframe()
+
+    assert gdf.index.name == "id"
+    assert gdf.index.tolist() == ["01001", "01002"]
+    assert "id" not in gdf.columns
+
+
+def test_get_network_mapping_deduplicates_identical_relations_and_filters_nodes(
+    monkeypatch, tmp_path
+):
+    zones = Zones(zones="districts", version=2, output_directory=str(tmp_path))
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {
+                "districts_mitma": ["D2", "D1", "D1", "D3"],
+                "municipalities": ["28080", "28079", "28079", "28081"],
+            }
+        ),
+    )
+
+    mapping = zones.get_network_mapping(
+        "districts_mitma", "municipalities", source_ids=["D2", "D1"]
+    )
+
+    assert mapping.to_dict("records") == [
+        {"source_id": "D1", "target_id": "28079"},
+        {"source_id": "D2", "target_id": "28080"},
+    ]
+
+
+def test_get_network_mapping_rejects_ambiguous_or_incomplete_relations(monkeypatch, tmp_path):
+    zones = Zones(zones="districts", version=2, output_directory=str(tmp_path))
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {
+                "districts_mitma": ["D1", "D1", "D2"],
+                "municipalities": ["28079", "28080", None],
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="without a target"):
+        zones.get_network_mapping("districts_mitma", "municipalities")
+
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {
+                "districts_mitma": ["D1", "D1"],
+                "municipalities": ["28079", "28080"],
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="not one-to-one"):
+        zones.get_network_mapping("districts_mitma", "municipalities")
+
+
+def test_get_province_mapping_derives_ine_province_and_validates_codes(monkeypatch, tmp_path):
+    zones = Zones(zones="districts", version=2, output_directory=str(tmp_path))
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {
+                "districts_mitma": ["D1", "D2"],
+                "municipalities": ["28079", "08001"],
+            }
+        ),
+    )
+    mapping = zones.get_province_mapping(source_ids=["D1", "D2"])
+    assert mapping.to_dict("records") == [
+        {"source_id": "D1", "target_id": "28"},
+        {"source_id": "D2", "target_id": "08"},
+    ]
+
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {"districts_mitma": ["D1"], "municipalities": ["not-an-ine-code"]}
+        ),
+    )
+    with pytest.raises(ValueError, match="five-digit INE"):
+        zones.get_province_mapping()
+
+
+def test_province_mapping_integrates_with_network_and_drops_internalized_flows(
+    monkeypatch, tmp_path
+):
+    zones = Zones(zones="districts", version=2, output_directory=str(tmp_path))
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {
+                "districts_mitma": ["D1", "D2", "D3"],
+                "municipalities": ["28079", "28080", "08001"],
+            }
+        ),
+    )
+    district_network = build_network(
+        pd.DataFrame(
+            {
+                "id_origin": ["D1", "D2"],
+                "id_destination": ["D2", "D3"],
+                "n_trips": [4.0, 7.0],
+            }
+        )
+    )
+
+    province_network = aggregate_network(
+        district_network,
+        zones.get_province_mapping(source_ids=district_network.node_ids),
+        self_loops="drop",
+    )
+
+    assert province_network.node_ids.tolist() == ["08", "28"]
+    assert province_network.total_weight == pytest.approx(7.0)
+    assert province_network.to_edge_table().to_dicts() == [
+        {"id_origin": "28", "id_destination": "08", "weight": 7.0}
+    ]
+    assert province_network.audit()["provenance"]["spatial"]["dropped_target_self_loop_weight"] == pytest.approx(4.0)
