@@ -10,7 +10,7 @@ except FileNotFoundError:
 
 setup(
     name="pyspainmobility",
-    version="1.1.2",
+    version="2.0.0",
     author="Massimiliano Luca",
     author_email="mluca@fbk.eu",
     description="Library for downloading and processing Spanish mobility data from MITMA",
@@ -26,8 +26,9 @@ setup(
         "tqdm>=4.0.0",
         "matplotlib>=3.0.0",
         "pyarrow>=8.0.0",
-        "dask[dataframe] >=2024.0"
-
+        "dask[dataframe] >=2024.0",
+        "polars>=1.25,<2",
+        "scipy>=1.11",
     ],
     extras_require={
         # for building the Sphinx docs
@@ -41,6 +42,16 @@ setup(
         "dev": [
             "pytest>=6.0",
             "flake8",
+            "networkx>=3.0",
+            "infomap>=2.15,<3",
+        ],
+        # adapters for users who need NetworkX algorithms or visualisation
+        "network": [
+            "networkx>=3.0",
+        ],
+        # community detection adapter; deliberately optional and CSR-native
+        "infomap": [
+            "infomap>=2.15,<3",
         ],
     },
     classifiers=[

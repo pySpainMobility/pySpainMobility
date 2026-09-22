@@ -14,14 +14,15 @@ Use this checklist for every release so pip and conda stay aligned.
 4. Build and validate PyPI artifacts:
    - `python -m build`
    - `python -m twine check dist/*`
-5. Build conda artifact:
-   - `conda build conda-recipes/pyspainmobility`
+5. Record the SHA-256 of the exact source archive to upload and set it in `conda-recipes/pyspainmobility/meta.yaml`:
+   - `shasum -a 256 dist/pyspainmobility-X.Y.Z.tar.gz`
 6. Push code and tag:
    - `git push origin main`
    - `git push origin vX.Y.Z`
 7. Publish PyPI:
    - `python -m twine upload dist/*`
-8. Publish conda:
+8. Build and publish conda only after PyPI exposes that exact sdist:
+   - `conda build conda-recipes/pyspainmobility`
    - `anaconda upload /home/ciro/miniconda3/conda-bld/noarch/pyspainmobility-X.Y.Z-py_0.conda`
 9. Verify published versions:
    - `python -c "import json,urllib.request as u;print(json.load(u.urlopen('https://pypi.org/pypi/pyspainmobility/json'))['info']['version'])"`

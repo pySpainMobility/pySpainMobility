@@ -4,6 +4,7 @@ import geopandas as gpd
 import os
 import matplotlib
 from os.path import expanduser
+from typing import Optional
 
 class Zones:
     def __init__(self, zones: str = 'municipalities', version: int = 2, output_directory: str = None):
@@ -119,7 +120,9 @@ class Zones:
 
         if os.path.exists(output_file_path):
             print(f"File {output_file_path} already exists. Loading it...")
-            self.complete_df = gpd.read_file(output_file_path)
+            self.complete_df = self._canonicalize_geodataframe(
+                gpd.read_file(output_file_path)
+            )
             return
 
         if self.version == 2:
@@ -174,7 +177,7 @@ class Zones:
             complete_df = gpd.GeoDataFrame(complete_df, crs="EPSG:4326")
             complete_df.reset_index(inplace=True)
             complete_df.rename(columns={"ID": "id"}, inplace=True)
-            complete_df.set_index("id", inplace=True)
+            complete_df = self._canonicalize_geodataframe(complete_df)
             complete_df.to_file(output_file_path, driver="GeoJSON")
             self.complete_df = complete_df
             return
@@ -187,9 +190,43 @@ class Zones:
 
         complete_df = zonification
         complete_df.rename(columns={"ID": "id"}, inplace=True)
-        complete_df.set_index("id", inplace=True)
+        complete_df = self._canonicalize_geodataframe(complete_df)
         complete_df.to_file(output_file_path, driver="GeoJSON")
         self.complete_df = complete_df
+
+    @staticmethod
+    def _canonicalize_geodataframe(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """Return every zoning geometry with the same string ``id`` index.
+
+        GeoJSON persists a named index as a regular property.  Without this
+        normalization, a fresh download and a cached GeoJSON exposed different
+        join contracts to users.
+        """
+        if not isinstance(frame, gpd.GeoDataFrame):
+            raise TypeError("Zone geometry must be a GeoDataFrame.")
+        result = frame.copy()
+        id_column = next(
+            (column for column in result.columns if str(column).lower() == "id"),
+            None,
+        )
+        if id_column is not None:
+            identifiers = result[id_column]
+        elif result.index.name is not None and str(result.index.name).lower() == "id":
+            identifiers = pd.Series(result.index, index=result.index)
+        else:
+            raise KeyError("Zone geometry must provide an 'id' column or index.")
+        if identifiers.isna().any():
+            raise ValueError("Zone geometry contains null or empty IDs.")
+        identifiers = identifiers.astype(str).str.strip()
+        if identifiers.eq("").any():
+            raise ValueError("Zone geometry contains null or empty IDs.")
+        if identifiers.duplicated().any():
+            examples = identifiers[identifiers.duplicated()].head(5).tolist()
+            raise ValueError("Zone geometry contains duplicate IDs: %s" % examples)
+        result.index = pd.Index(identifiers, name="id")
+        if id_column is not None:
+            result = result.drop(columns=[id_column])
+        return result
 
 
     def _resolve_data_file(self, filename: str) -> str:
@@ -326,3 +363,149 @@ class Zones:
                     temp_df = temp_df.join(relacion.groupby('id')[i].apply(set))
 
             return temp_df
+
+    @staticmethod
+    def _normalize_relation_identifier(value, *, column: str) -> Optional[str]:
+        """Normalize one scalar identifier from a zoning relation table."""
+        if isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError(
+                f"Relation column '{column}' contains a multi-valued entry. "
+                "Use the version-2 relation table or resolve it explicitly before "
+                "building a network mapping."
+            )
+        if pd.isna(value):
+            return None
+        identifier = str(value).strip()
+        return identifier or None
+
+    def get_network_mapping(
+        self,
+        source_column: str,
+        target_column: str,
+        source_ids=None,
+    ) -> pd.DataFrame:
+        """Return a verified, deterministic mapping for network aggregation.
+
+        The official relationship file can contain several rows for one source
+        zone.  Repeated *identical* pairs are harmless and are removed; two
+        distinct targets for the same source are ambiguous and raise a
+        :class:`ValueError`.  This prevents an aggregation from silently
+        choosing an arbitrary territorial correspondence.
+
+        Parameters
+        ----------
+        source_column, target_column : str
+            Column names returned by :meth:`get_zone_relations`.
+        source_ids : iterable, optional
+            IDs occurring in the OD/network being aggregated.  When supplied,
+            the output is restricted to these IDs and missing correspondences
+            are reported before any flow is transformed.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Two string columns, ``source_id`` and ``target_id``, sorted by
+            ``source_id``.  It is accepted directly by
+            :func:`pyspainmobility.network.aggregate_network` and
+            :func:`pyspainmobility.network.aggregate_od_network`.
+        """
+        relations = self.get_zone_relations()
+        if relations.index.name == "id" and "id" not in relations.columns:
+            relations = relations.reset_index()
+        required = {source_column, target_column}
+        missing_columns = sorted(required.difference(relations.columns))
+        if missing_columns:
+            raise KeyError(
+                "Unknown relation column(s): %s. Available columns: %s"
+                % (missing_columns, sorted(relations.columns))
+            )
+
+        mapping = relations.loc[:, [source_column, target_column]].copy()
+        mapping.columns = ["source_id", "target_id"]
+        mapping["source_id"] = mapping["source_id"].map(
+            lambda value: self._normalize_relation_identifier(
+                value, column=source_column
+            )
+        )
+        mapping["target_id"] = mapping["target_id"].map(
+            lambda value: self._normalize_relation_identifier(
+                value, column=target_column
+            )
+        )
+
+        # A row without a source cannot describe a source-to-target mapping.
+        mapping = mapping.loc[mapping["source_id"].notna()].copy()
+        missing_target = mapping.loc[mapping["target_id"].isna(), "source_id"]
+        if not missing_target.empty:
+            examples = missing_target.drop_duplicates().head(5).tolist()
+            raise ValueError(
+                "Relation mapping has source IDs without a target in '%s': %s"
+                % (target_column, examples)
+            )
+
+        mapping = mapping.drop_duplicates()
+        target_counts = mapping.groupby("source_id", sort=False)["target_id"].nunique()
+        ambiguous = target_counts.loc[target_counts > 1].index.tolist()
+        if ambiguous:
+            raise ValueError(
+                "Relation mapping is not one-to-one: source IDs map to multiple "
+                "targets in '%s': %s" % (target_column, ambiguous[:5])
+            )
+
+        if source_ids is not None:
+            if isinstance(source_ids, (str, bytes)):
+                raise TypeError("source_ids must be an iterable of identifiers, not a string.")
+            requested = pd.Index(
+                [
+                    self._normalize_relation_identifier(value, column="source_ids")
+                    for value in source_ids
+                ]
+            )
+            if requested.isna().any():
+                raise ValueError("source_ids contains null or empty identifiers.")
+            requested = requested.drop_duplicates()
+            available = pd.Index(mapping["source_id"])
+            absent = requested.difference(available)
+            if not absent.empty:
+                raise ValueError(
+                    "No relation mapping is available for source IDs: %s"
+                    % absent[:5].tolist()
+                )
+            mapping = mapping.loc[mapping["source_id"].isin(requested)]
+
+        return mapping.sort_values("source_id", kind="stable").reset_index(drop=True)
+
+    def get_province_mapping(
+        self,
+        source_column: str = "districts_mitma",
+        municipality_column: str = "municipalities",
+        source_ids=None,
+    ) -> pd.DataFrame:
+        """Map MITMA zones to Spanish provinces through INE municipality IDs.
+
+        Province geometries are not a native :class:`Zones` level.  Spanish
+        INE municipality identifiers have five digits and their first two
+        digits identify the province.  This helper exposes that hierarchy as a
+        validated ``source_id``/``target_id`` mapping, where ``target_id`` is
+        the two-digit INE province code.
+
+        By default it maps MITMA districts, the level used by the mobility OD
+        data.  As with :meth:`get_network_mapping`, ambiguous district-to-
+        municipality relations raise instead of selecting a first match.
+        """
+        mapping = self.get_network_mapping(
+            source_column=source_column,
+            target_column=municipality_column,
+            source_ids=source_ids,
+        )
+        valid_municipalities = mapping["target_id"].str.fullmatch(r"\d{5}")
+        if not valid_municipalities.all():
+            examples = mapping.loc[~valid_municipalities, "target_id"].head(5).tolist()
+            raise ValueError(
+                "Cannot derive province codes: '%s' must contain five-digit INE "
+                "municipality identifiers; invalid values: %s"
+                % (municipality_column, examples)
+            )
+        result = mapping.copy()
+        result["target_id"] = result["target_id"].str[:2]
+        return result

@@ -191,3 +191,18 @@ cython_debug/
 .venv-test/
 experiments/
 experiments_data/
+
+# Paper revalidation workspace: source data, cache, and derived analyses.
+# Keep publication-ready scripts/results in a dedicated research repository.
+/analysis/
+
+# Downloaded MITMA data and locally derived geometry caches.
+/data/
+
+# Generated visual artefacts. Keep the portable scripts that reproduce them.
+/examples/*.png
+/examples/*.pdf
+/examples/*.html
+
+# Paper-specific figure script; it depends on the ignored local analysis data.
+/scripts/generate_paper_network_figure.py

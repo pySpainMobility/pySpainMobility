@@ -84,11 +84,249 @@ mobility = Mobility(
     zones="municipalities",
     start_date="2022-01-01",
     end_date="2022-01-03",
-    backend="arrow",  # default
+    backend="auto",  # default: Polars, then Arrow, then pandas
 )
 ```
 
-If `backend="arrow"` is selected but `pyarrow` is not installed, `pySpainMobility` automatically falls back to `pandas` and emits a warning.
+The `auto` backend selects Polars by default, then Arrow and pandas only as
+runtime fallbacks. Explicit backend selection remains available for
+reproducible comparisons and backwards compatibility.
+
+If `backend="arrow"` is selected but `pyarrow` is not installed,
+`pySpainMobility` automatically falls back to `pandas` and emits a warning.
+
+Polars is installed with the base package and can be selected explicitly when
+needed:
+
+```python
+mobility = Mobility(
+    version=2,
+    zones="municipalities",
+    start_date="2022-01-01",
+    backend="polars",
+)
+```
+
+The Polars backend keeps the public API compatible by returning an Arrow-backed
+`pandas.DataFrame` when `return_df=True`. With `return_df=False`, the processed
+result is written directly from Polars without materializing an intermediate
+pandas DataFrame. `use_dask=True` is unnecessary and ignored when Polars is
+selected because the lazy multi-file pipeline is already parallel.
+
+### Building sparse mobility networks
+
+`pyspainmobility.network` turns a processed OD table into a directed, weighted
+SciPy CSR matrix. Repeated OD rows are summed, `node_ids` is the explicit
+row/column contract, and `audit()` records the represented flow and any
+dropped self-loops.
+
+```python
+from pyspainmobility import NetworkSpec, build_network
+
+network = build_network(
+    "Viajes_municipalities_2022-01-01_2022-01-03_v2.parquet",
+    spec=NetworkSpec(weight="n_trips", self_loops="keep"),
+)
+
+print(network.adjacency)       # SciPy CSR sparse matrix
+print(network.node_ids)        # stable matrix-to-zone mapping
+print(network.audit())         # flow accounting
+```
+
+The OD network is directed by construction. When an undirected representation
+is scientifically appropriate, choose the transformation explicitly:
+
+```python
+from pyspainmobility import symmetrize_network
+
+bilateral_flow = symmetrize_network(network, method="sum")
+reciprocal_flow = symmetrize_network(network, method="mutual")
+```
+
+Available rules are `sum`, `mean`, `max`, and `mutual`. The resulting matrix
+is symmetric, while `total_weight` and `to_edge_table()` count each logical
+undirected edge once; the raw stored-matrix total remains in the audit trail.
+
+For reproducible comparisons across periods or zoning editions, pass a named
+node index instead of a bare list of IDs:
+
+```python
+from pyspainmobility import NodeIndex, build_network
+
+municipal_v2 = NodeIndex(
+    ["01001", "01002"],
+    zoning_id="mitma_municipalities",
+    zoning_version="v2",
+)
+network = build_network(od_dataframe, node_index=municipal_v2)
+```
+
+`network.align_to(other_index)` reorders a network only when the node universe
+and zoning metadata are compatible. A different zoning identifier or version
+is an error, not an implicit comparison.
+
+For NetworkX algorithms or visualization, install `pyspainmobility[network]`
+and use `pyspainmobility.network.integrations.to_networkx(network)`. The CSR
+representation remains the canonical format, so future adapters such as
+Infomap do not require a NetworkX conversion.
+
+For community detection with Infomap, install `pyspainmobility[infomap]` and
+run the adapter directly on that CSR matrix:
+
+```python
+from pyspainmobility.network.integrations import run_infomap
+
+partition = run_infomap(network, seed=123, num_trials=10)
+print(partition.communities())
+```
+
+The result retains the exact `NodeIndex`, Infomap version, options, and a
+fingerprint of the matrix supplied to the algorithm. Mobility OD weights are
+passed as directed edge weights to Infomap's random-walk model; they should not
+be interpreted as the resulting random-walk flows.
+
+### Sparse metrics and temporal comparisons
+
+Metrics work directly on the canonical CSR representation and preserve the
+`NodeIndex` contract when two networks use different valid node orderings.
+Comparisons reject different weight fields or normalizations, such as raw
+trip totals versus trips per observed day.
+
+```python
+from pyspainmobility import compare_networks, node_strengths
+
+summary = compare_networks(network_before, network_after)
+print(summary.edge_jaccard, summary.weighted_jaccard)
+print(node_strengths(network_before))
+```
+
+`edge_changes(network_before, network_after)` returns only edges in the sparse
+union, classified as added, removed, increased, decreased, or unchanged.
+`destination_similarity(...)` returns a per-origin cosine similarity of the
+destination-flow profile. For a temporal network, use
+`compare_snapshots()`, `snapshot_edge_changes()`, and
+`destination_stability()` with observed dates.
+
+For an undirected network, `node_strengths()` counts a self-loop once as a
+mobility flow. NetworkX's weighted degree counts an undirected self-loop twice.
+
+### Temporal snapshots and data coverage
+
+Build temporal networks from the same processed OD table with one shared node
+index. Snapshots are evaluated only when requested and cached thereafter. To
+compute per-day summaries correctly, pass both the requested study dates and
+the dates whose source file was actually observed: this distinguishes a missing
+file from an observed day with no OD rows.
+Date, Datetime, and ISO timestamp string columns are normalized to calendar
+days. Malformed dates are rejected rather than treated as empty observed days.
+
+```python
+from pyspainmobility import build_temporal_network
+
+temporal = build_temporal_network(
+    od_dataframe,
+    requested_dates=["2024-01-01", "2024-01-02", "2024-01-03"],
+    observed_dates=["2024-01-01", "2024-01-03"],
+)
+
+print(temporal.coverage.missing_source_dates)  # ("2024-01-02",)
+network_on_jan_1 = temporal.snapshot("2024-01-01")
+```
+
+If `observed_dates` is omitted, availability is inferred from OD rows; the
+library deliberately reports requested-but-absent dates as unresolved rather
+than assuming that their flow is zero.
+
+When the OD table was obtained with `Mobility`, prefer its acquisition record
+over a manually assembled date list. The record distinguishes download status
+(`available`, `failed`, `empty`) from `parse_status` (`valid`, `empty`, `failed`,
+`not_processed`):
+
+```python
+od_dataframe = mobility.get_od_data(return_df=True)
+temporal = build_temporal_network(
+    od_dataframe,
+    acquisition_manifest=mobility.get_acquisition_manifest("Viajes"),
+)
+```
+
+With a `parse_status` column, only acquired files parsed as `valid` or genuinely
+`empty` count as observed days. A downloaded file with invalid mandatory rows
+does not enter the denominator as a zero-flow day. A manually supplied legacy
+manifest without `parse_status` still treats `available` as observed; its
+author must verify that parsing succeeded. The `coverage` field remains
+`unverified` unless the upstream source provides a completeness guarantee.
+
+If processed OD rows still exist for a manifest day marked `failed`, the
+temporal builder raises by default. This prevents a partial day from entering
+an observed-day average. After reviewing the data loss, callers may explicitly
+remove all rows from such days with `failed_data_policy="exclude"`; the dates
+and excluded flow weight remain in `temporal.audit()`.
+
+Temporal aggregation uses that same definition of observation:
+
+```python
+total_network = temporal.sum_network()
+daily_mean_network = temporal.mean_per_observed_day()
+```
+
+`mean_per_observed_day()` divides by all selected observed days, including
+known empty days. It rejects dates with a failed or missing source file. This
+is intentionally different from an active-day mean, which is not yet exposed
+because it needs a separate per-edge observation contract.
+The per-day normalization stays in network metadata through spatial
+aggregation and directed-to-undirected conversion.
+
+For long studies, pass a Hive-partitioned Parquet dataset directory, for
+example `od/date=2024-01-01/part-0.parquet`. Polars can then prune partitions
+when a snapshot is requested. Period sums and observed-day means aggregate OD
+rows in one scan and do not populate the snapshot cache. Snapshots use an LRU
+cache of 32 matrices by default; this bounds the number of cached days, not
+their memory footprint. Set `max_cached_snapshots=0` to avoid retention or
+`None` to retain all snapshots deliberately.
+
+### Spatial aggregation without losing flow
+
+For a fine-resolution network already in memory, aggregation uses the sparse
+projection `P.T @ A @ P`. If OD data are still available, use the data-first
+function so that the zoning joins and group-by run in Polars before a CSR
+matrix is created.
+
+```python
+from pyspainmobility import aggregate_od_network
+
+mapping = {"01001": "province_04", "01002": "province_04"}
+province_network = aggregate_od_network(od_dataframe, mapping)
+
+print(province_network.audit()["provenance"]["spatial"])
+```
+
+Every fine node must have exactly one target zone. The audit reports flow that
+becomes internal to an aggregated zone (`internalized_weight`), and any target
+self-loops explicitly discarded with `self_loops="drop"`; neither is silently
+lost. Provenance history also retains the accounting from initial network
+construction, including source self-loops dropped before later transformations.
+
+For an official, validated district-to-province correspondence, obtain the
+mapping from `Zones`. Province geometries are not a native zoning level: the
+helper derives the two-digit INE province code from the five-digit INE
+municipality code and rejects ambiguous territorial relations rather than
+arbitrarily choosing one.
+
+```python
+from pyspainmobility import Zones
+from pyspainmobility.network import aggregate_network
+
+zones = Zones(zones="districts", version=2, output_directory="data")
+mapping = zones.get_province_mapping(source_ids=district_network.node_ids)
+province_network = aggregate_network(
+    district_network, mapping, self_loops="drop"
+)
+```
+
+Use `self_loops="drop"` when the research question is explicitly
+*inter-province* mobility: flows between distinct districts in the same
+province become loops only after this aggregation.
 
 
 ### Working with R?

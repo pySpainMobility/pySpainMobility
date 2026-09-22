@@ -15,6 +15,12 @@ except ImportError:
     pa = None
     pacsv = None
 
+# Optional Polars import – used when backend='polars'
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
 # Optional Dask import – only used when caller sets use_dask=True
 try:
     import dask.dataframe as dd
@@ -45,14 +51,16 @@ class Mobility:
     output_directory : str
         The directory to save the raw data and the processed parquet. Default is None. If not specified, the data will be saved in a folder named 'data' in user's home directory.
     use_dask : bool
-        Whether to use Dask for processing large datasets. Default is False. Requires dask to be installed.
+        Whether to use Dask for processing large datasets with the Arrow or
+        pandas backend. Default is False. Ignored by the Polars backend, which
+        already executes the multi-file query in parallel.
     backend : str
-        Dataframe backend used while reading and processing files. Use
-        'arrow' (default) for Apache Arrow-backed pandas columns
-        (typically faster and more memory-efficient) or 'pandas' for
-        classic pandas dtypes. If 'arrow' is requested but pyarrow is not
-        installed, the class automatically falls back to 'pandas' and
-        emits a warning.
+        Dataframe backend used while reading and processing files. The default
+        'auto' selects Polars when installed, then Arrow, then pandas. Use
+        'polars' for a lazy, streaming pipeline, 'arrow' for Apache
+        Arrow-backed pandas columns, or 'pandas' for classic pandas dtypes.
+        Polars and Arrow both return an Arrow-backed pandas DataFrame when a
+        public method is called with ``return_df=True``.
     Examples
     --------
     >>> from pyspainmobility import Mobility
@@ -73,17 +81,27 @@ class Mobility:
         end_date: str = None,
         output_directory: str = None,
         use_dask: bool = False,
-        backend: str = "arrow",
+        backend: str = "auto",
     ):
         self.version = version
         self.zones = zones
         self.start_date = start_date
         self.output_directory = output_directory
         self.use_dask = use_dask
-        self.backend = str(backend).lower()
+        self.requested_backend = str(backend).lower()
+        self.backend = self.requested_backend
 
-        if self.backend not in {"arrow", "pandas"}:
-            raise ValueError("backend must be either 'arrow' or 'pandas'")
+        if self.backend not in {"auto", "arrow", "pandas", "polars"}:
+            raise ValueError(
+                "backend must be one of 'auto', 'arrow', 'pandas', or 'polars'"
+            )
+        if self.backend == "auto":
+            if pl is not None:
+                self.backend = "polars"
+            elif pa is not None and pacsv is not None:
+                self.backend = "arrow"
+            else:
+                self.backend = "pandas"
         if self.backend == "arrow" and (pa is None or pacsv is None):
             warnings.warn(
                 "backend='arrow' requested but pyarrow is not installed. "
@@ -93,8 +111,20 @@ class Mobility:
                 stacklevel=2,
             )
             self.backend = "pandas"
+        if self.backend == "polars" and pl is None:
+            raise ImportError(
+                "backend='polars' requires Polars. Reinstall pyspainmobility "
+                "so its base dependencies are available."
+            )
 
-        if self.use_dask and dd is None:
+        if self.use_dask and self.backend == "polars":
+            warnings.warn(
+                "use_dask=True is ignored by backend='polars' because Polars "
+                "already executes the multi-file pipeline in parallel.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif self.use_dask and dd is None:
             raise ImportError("Dask is not installed. Please install dask to use use_dask=True")
 
         utils.zone_assert(zones, version)
@@ -119,6 +149,8 @@ class Mobility:
         data_directory = utils.get_data_directory()
 
         self.dates = utils.get_dates_between(start_date, end_date)
+        self._acquisition_manifests = {}
+        self._od_processing_outcomes = {}
 
         try:
             valid_dates = utils.get_valid_dates(self.version)
@@ -172,6 +204,8 @@ class Mobility:
         """
         if self.backend == "arrow":
             return self._read_pipe_file_arrow(filepath, dtype=dtype)
+        if self.backend == "polars":
+            return self._read_pipe_file_polars(filepath, dtype=dtype)
         return self._read_pipe_file_pandas(filepath, dtype=dtype)
 
     @staticmethod
@@ -267,11 +301,35 @@ class Mobility:
             print(f"[warn] Arrow parser failed for {filepath}: {exc}. Falling back to pandas parser.")
             return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
 
+    @staticmethod
+    def _read_pipe_file_polars(filepath: str, dtype: dict = None) -> pd.DataFrame:
+        """
+        Read a pipe-separated MITMA file with Polars and expose the result as
+        an Arrow-backed pandas DataFrame for public API compatibility.
+        """
+        if pl is None:
+            raise ImportError(
+                "Polars is not available. Reinstall pyspainmobility so its "
+                "base dependencies are available."
+            )
+
+        try:
+            frame = Mobility._scan_pipe_files_polars(filepath).collect(
+                engine="streaming"
+            )
+            return frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+        except Exception as exc:
+            print(
+                f"[warn] Polars parser failed for {filepath}: {exc}. "
+                "Falling back to pandas parser."
+            )
+            return Mobility._read_pipe_file_pandas(filepath, dtype=dtype)
+
     def _finalize_backend_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Normalize output dtypes according to the selected backend.
         """
-        if self.backend != "arrow" or df is None:
+        if self.backend not in {"arrow", "polars"} or df is None:
             return df
         try:
             return df.convert_dtypes(dtype_backend="pyarrow")
@@ -331,10 +389,15 @@ class Mobility:
         normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
         normalized = normalized.str.replace(",", ".", regex=False)
         if strip_thousands:
-            thousands_mask = normalized.str.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+")
-            has_multi_group_separator = normalized.str.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3}){2,}").fillna(False).any()
-            if has_multi_group_separator:
-                normalized = normalized.where(~thousands_mask, normalized.str.replace(".", "", regex=False))
+            # A single ``.xxx`` is ambiguous in MITMA data and is treated as a
+            # decimal value. Only two or more grouped triplets are unambiguously
+            # a thousands notation. This decision must be row-local: using the
+            # values in another file would make a multi-file result batch-dependent.
+            thousands_mask = normalized.str.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3}){2,}")
+            normalized = normalized.where(
+                ~thousands_mask,
+                normalized.str.replace(".", "", regex=False),
+            )
         return pd.to_numeric(normalized, errors="coerce")
 
     @staticmethod
@@ -359,6 +422,228 @@ class Mobility:
         compacted = normalized.where(integer_like, normalized.str.replace(".", "", regex=False))
         return pd.to_numeric(compacted, errors="coerce").astype("Int64")
 
+    @staticmethod
+    def _polars_clean_string(column: str):
+        """Return a normalized Polars string expression for MITMA fields."""
+        return pl.col(column).str.strip_chars()
+
+    @staticmethod
+    def _polars_numeric(column: str, strip_thousands: bool = False):
+        """Polars equivalent of :meth:`_to_numeric`."""
+        normalized = (
+            Mobility._polars_clean_string(column)
+            .str.replace_all(",", ".", literal=True)
+        )
+        if strip_thousands:
+            thousands_pattern = r"^[+-]?\d{1,3}(?:\.\d{3}){2,}$"
+            normalized = pl.when(normalized.str.contains(thousands_pattern)).then(
+                normalized.str.replace_all(".", "", literal=True)
+            ).otherwise(normalized)
+        return normalized.cast(pl.Float64, strict=False)
+
+    @staticmethod
+    def _polars_date(column: str):
+        """Polars equivalent of :meth:`_normalize_date_series`."""
+        normalized = (
+            Mobility._polars_clean_string(column)
+            .str.replace(r"\.0+$", "")
+            .str.replace_all("-", "", literal=True)
+            .str.replace_all("/", "", literal=True)
+            .str.replace_all(" ", "", literal=True)
+            .str.pad_start(8, "0")
+        )
+        return pl.concat_str(
+            [
+                normalized.str.slice(0, 4),
+                pl.lit("-"),
+                normalized.str.slice(4, 2),
+                pl.lit("-"),
+                normalized.str.slice(6, 2),
+            ]
+        )
+
+    @staticmethod
+    def _polars_identifier(column: str):
+        """Polars equivalent of :meth:`_normalize_identifier_series`."""
+        return (
+            Mobility._polars_clean_string(column)
+            .str.replace(r"\.0+$", "")
+            .str.replace_all(".", "", literal=True)
+        )
+
+    @staticmethod
+    def _scan_pipe_files_polars(filepaths, include_file_paths=False):
+        """Create a normalized lazy scan for one or more MITMA files."""
+        return pl.scan_csv(
+            filepaths,
+            separator="|",
+            encoding="utf8-lossy",
+            infer_schema=False,
+            # ``empty_string_is_null`` was introduced after the last Polars
+            # release supporting Python 3.9.  Listing the empty token as a
+            # null value preserves the same parsing contract across both APIs.
+            null_values=["", "NA", "nan", "None"],
+            with_column_names=lambda columns: [
+                Mobility._normalize_column_name(column) for column in columns
+            ],
+            include_file_paths="_source_path" if include_file_paths else None,
+        )
+
+    @staticmethod
+    def _polars_to_pandas(frame):
+        """Expose a Polars result through the library's pandas API."""
+        return frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+
+    @staticmethod
+    def _valid_input_files(filepaths):
+        """Discard missing or empty downloads without aborting a batch."""
+        valid = []
+        for filepath in filepaths:
+            if not os.path.exists(filepath):
+                print(f"[warn] File does not exist, skipped: {filepath}")
+            elif os.path.getsize(filepath) == 0:
+                print(f"[warn] Empty file skipped: {filepath}")
+            else:
+                valid.append(filepath)
+        return valid
+
+    def _build_od_lazy_polars(self, filepaths, keep_activity, social_agg):
+        """Build the optimized Polars query plan for one or more OD files."""
+        source_to_target = {
+            "actividad_origen": "activity_origin",
+            "actividad_destino": "activity_destination",
+            "renta": "income",
+            "edad": "age",
+            "sexo": "gender",
+        }
+        required_source = [
+            "fecha",
+            "periodo",
+            "origen",
+            "destino",
+            "viajes",
+            "viajes_km",
+        ]
+
+        lazy_frame = self._scan_pipe_files_polars(filepaths)
+        source_columns = set(lazy_frame.collect_schema().names())
+        missing = [column for column in required_source if column not in source_columns]
+        if missing:
+            print(
+                f"[warn] Missing expected columns before translation: {missing}. "
+                f"Columns found: {sorted(source_columns)}"
+            )
+            return None
+
+        expressions = [
+            self._polars_date("fecha").alias("date"),
+            self._polars_clean_string("periodo")
+            .cast(pl.Int64, strict=False)
+            .alias("hour"),
+            self._polars_identifier("origen").alias("id_origin"),
+            self._polars_identifier("destino").alias("id_destination"),
+        ]
+
+        if keep_activity:
+            activity_mapping = {
+                "casa": "home",
+                "frecuente": "other_frequent",
+                "trabajo_estudio": "work_or_study",
+                "no_frecuente": "other_non_frequent",
+            }
+            for source in ("actividad_origen", "actividad_destino"):
+                expression = (
+                    self._polars_clean_string(source).replace(activity_mapping)
+                    if source in source_columns
+                    else pl.lit(None, dtype=pl.String)
+                )
+                expressions.append(expression.alias(source_to_target[source]))
+
+        if social_agg:
+            for source in ("renta", "edad", "sexo"):
+                expression = (
+                    self._polars_clean_string(source)
+                    if source in source_columns
+                    else pl.lit(None, dtype=pl.String)
+                )
+                if source == "sexo":
+                    expression = expression.replace(
+                        {"hombre": "male", "mujer": "female"}
+                    )
+                expressions.append(expression.alias(source_to_target[source]))
+
+        expressions.extend(
+            [
+                self._polars_numeric("viajes", strip_thousands=True).alias(
+                    "n_trips"
+                ),
+                self._polars_numeric("viajes_km", strip_thousands=True).alias(
+                    "trips_total_length_km"
+                ),
+            ]
+        )
+
+        group_cols = ["date", "hour", "id_origin", "id_destination"]
+        if keep_activity:
+            group_cols += ["activity_origin", "activity_destination"]
+        if social_agg:
+            group_cols += ["income", "age", "gender"]
+
+        return (
+            lazy_frame.select(expressions)
+            .drop_nulls(
+                [
+                    "date",
+                    "id_origin",
+                    "id_destination",
+                    "n_trips",
+                    "trips_total_length_km",
+                ]
+            )
+            .group_by(group_cols)
+            .agg(
+                pl.col("n_trips").sum(),
+                pl.col("trips_total_length_km").sum(),
+            )
+            .sort(group_cols, nulls_last=True)
+        )
+
+    def _process_od_files_polars(
+        self,
+        filepaths,
+        keep_activity,
+        social_agg,
+        as_pandas=True,
+    ):
+        """Execute one optimized Polars plan across all requested OD files."""
+        filepaths = self._valid_input_files(filepaths)
+        if not filepaths:
+            return None
+        try:
+            query = self._build_od_lazy_polars(
+                filepaths,
+                keep_activity=keep_activity,
+                social_agg=social_agg,
+            )
+            if query is None:
+                return None
+            result = query.collect(engine="streaming")
+            if result.is_empty():
+                print("[warn] No valid OD rows after preprocessing")
+                return None
+            return self._polars_to_pandas(result) if as_pandas else result
+        except Exception as exc:
+            print(f"[ERROR] Error processing OD data with Polars: {exc}")
+            return None
+
+    def _process_single_od_file_polars(self, filepath, keep_activity, social_agg):
+        """Compatibility wrapper for processing one OD file with Polars."""
+        return self._process_od_files_polars(
+            [filepath],
+            keep_activity=keep_activity,
+            social_agg=social_agg,
+        )
+
     def _process_single_od_file(self, filepath, keep_activity, social_agg):
         """Extract common OD file processing logic."""
         
@@ -375,6 +660,13 @@ class Mobility:
         if file_size == 0:
             print(f"[warn] {os.path.basename(filepath)} is actually empty (0 bytes), skipped")
             return None
+
+        if self.backend == "polars":
+            return self._process_single_od_file_polars(
+                filepath,
+                keep_activity=keep_activity,
+                social_agg=social_agg,
+            )
         
         try:
             print(f"Reading {'gzipped' if filepath.endswith('.gz') else 'regular'} file...")
@@ -493,7 +785,13 @@ class Mobility:
         if social_agg:
             group_cols += ["income", "age", "gender"]
 
-        df = df.groupby(group_cols, as_index=False)[["n_trips", "trips_total_length_km"]].sum()
+        # MITMA uses missing demographic values when information cannot be
+        # provided (for example for privacy reasons).  They are still valid
+        # mobility observations, so retaining optional dimensions must not
+        # remove their flows from the aggregate.
+        df = df.groupby(group_cols, as_index=False, dropna=False)[
+            ["n_trips", "trips_total_length_km"]
+        ].sum()
         
         return df
 
@@ -537,61 +835,58 @@ class Mobility:
         4  2023-04-01     0     01001          48036    2.750             147.724000
         """
 
-        if self.version == 2:
-            m_type = "Viajes"
-            local_list = self._donwload_helper(m_type)
-            temp_dfs = []
-            print("Generating parquet file for ODs....")
-            
-            if self.use_dask:
-                # Use Dask for processing
-                return self._process_od_data_dask(local_list, m_type, keep_activity, social_agg, return_df)
-            else:
-                # Original pandas processing using extracted method
-                for f in tqdm.tqdm(local_list):
-                    result = self._process_single_od_file(f, keep_activity, social_agg)
-                    if result is not None:
-                        temp_dfs.append(result)
+        m_type = "Viajes" if self.version == 2 else "maestra1"
+        if self.version == 1:
+            keep_activity = False
+            social_agg = False
 
-                if not temp_dfs:
-                    print("No valid data found")
-                    return None
+        local_list = self._donwload_helper(m_type)
+        print("Generating parquet file for ODs....")
 
-                print("Concatenating all the dataframes....")
-                df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
-                df = self._finalize_backend_dataframe(df)
+        if self.backend == "polars":
+            frame = self._process_od_files_polars(
+                local_list,
+                keep_activity=keep_activity,
+                social_agg=social_agg,
+                as_pandas=False,
+            )
+            self._remember_od_processing(m_type, local_list, frame is not None)
+            if frame is None:
+                print("No valid data found")
+                return None
+            self._saving_parquet(frame, m_type)
+            return self._polars_to_pandas(frame) if return_df else None
 
-                self._saving_parquet(df, m_type)
-                return df if return_df else None
+        if self.use_dask:
+            return self._process_od_data_dask(
+                local_list,
+                m_type,
+                keep_activity,
+                social_agg,
+                return_df,
+            )
 
-        elif self.version == 1:
-            m_type = "maestra1"
-            local_list = self._donwload_helper(m_type)
-            temp_dfs = []
-            print("Generating parquet file for ODs....")
+        frames = []
+        for filepath in tqdm.tqdm(local_list):
+            result = self._process_single_od_file(
+                filepath,
+                keep_activity,
+                social_agg,
+            )
+            if result is not None:
+                frames.append(result)
 
-            if self.use_dask:
-                # Use Dask for processing
-                return self._process_od_data_dask(local_list, m_type, False, False, return_df)
-            else:
-                # Original pandas processing using extracted method
-                for f in tqdm.tqdm(local_list):
-                    result = self._process_single_od_file(f, False, False)
-                    if result is not None:
-                        temp_dfs.append(result)
+        if not frames:
+            self._remember_od_processing(m_type, local_list, False)
+            print("No valid data found")
+            return None
 
-                if not temp_dfs:
-                    print("No valid data found")
-                    return None
-
-                print("Concatenating all the dataframes....")
-                df = temp_dfs[0] if len(temp_dfs) == 1 else pd.concat(temp_dfs)
-                df = self._finalize_backend_dataframe(df)
-
-                self._saving_parquet(df, m_type)
-                return df if return_df else None
-
-        return None
+        print("Concatenating all the dataframes....")
+        frame = frames[0] if len(frames) == 1 else pd.concat(frames)
+        frame = self._finalize_backend_dataframe(frame)
+        self._remember_od_processing(m_type, local_list, True)
+        self._saving_parquet(frame, m_type)
+        return frame if return_df else None
 
     def _process_od_data_dask(self, local_list, m_type, keep_activity, social_agg, return_df):
         """Process OD data using Dask for better performance with large datasets """
@@ -624,20 +919,141 @@ class Mobility:
         valid_dfs = [df for df in processed_dfs if df is not None]
         
         if not valid_dfs:
+            self._remember_od_processing(m_type, local_list, False)
             print("No valid data found")
             return None
         
         print("Concatenating results...")
         df = pd.concat(valid_dfs, ignore_index=True)
         df = self._finalize_backend_dataframe(df)
+        self._remember_od_processing(m_type, local_list, True)
         
         self._saving_parquet(df, m_type)
         return df if return_df else None
+
+    def _build_overnight_lazy_polars(self, filepaths):
+        """Build the Polars plan for overnight-stay files."""
+        lazy_frame = self._scan_pipe_files_polars(filepaths)
+        required_source = {
+            "fecha",
+            "zona_residencia",
+            "zona_pernoctacion",
+            "personas",
+        }
+        source_columns = set(lazy_frame.collect_schema().names())
+        missing = sorted(required_source - source_columns)
+        if missing:
+            print(f"[warn] Missing expected overnight-stay columns: {missing}")
+            return None
+
+        return (
+            lazy_frame.select(
+                self._polars_date("fecha").alias("date"),
+                self._polars_identifier("zona_residencia").alias(
+                    "residence_area"
+                ),
+                self._polars_identifier("zona_pernoctacion").alias(
+                    "overnight_stay_area"
+                ),
+                self._polars_numeric("personas", strip_thousands=True).alias(
+                    "people"
+                ),
+            )
+            .drop_nulls(
+                ["date", "residence_area", "overnight_stay_area", "people"]
+            )
+        )
+
+    def _process_overnight_files_polars(self, filepaths, as_pandas=True):
+        """Execute one optimized Polars plan across overnight-stay files."""
+        filepaths = self._valid_input_files(filepaths)
+        if not filepaths:
+            return None
+        try:
+            query = self._build_overnight_lazy_polars(filepaths)
+            if query is None:
+                return None
+            result = query.collect(engine="streaming")
+            if result.is_empty():
+                return None
+            return self._polars_to_pandas(result) if as_pandas else result
+        except Exception as exc:
+            print(f"Error processing overnight-stay data with Polars: {exc}")
+            return None
+
+    def _build_number_of_trips_lazy_polars(self, filepaths):
+        """Build the Polars plan for number-of-trips files."""
+        lazy_frame = self._scan_pipe_files_polars(filepaths)
+        area_source = "zona_pernoctacion" if self.version == 2 else "distrito"
+        required_source = {"fecha", area_source, "numero_viajes", "personas"}
+        source_columns = set(lazy_frame.collect_schema().names())
+        missing = sorted(required_source - source_columns)
+        if missing:
+            print(f"[warn] Missing expected number-of-trips columns: {missing}")
+            return None
+
+        base_expressions = [
+            self._polars_date("fecha").alias("date"),
+            self._polars_identifier(area_source).alias("overnight_stay_area"),
+        ]
+        demographic_expressions = []
+        if self.version == 2:
+            demographic_expressions = [
+                (
+                    self._polars_clean_string("edad")
+                    if "edad" in source_columns
+                    else pl.lit(None, dtype=pl.String)
+                ).alias("age"),
+                (
+                    self._polars_clean_string("sexo").replace(
+                        {"hombre": "male", "mujer": "female"}
+                    )
+                    if "sexo" in source_columns
+                    else pl.lit(None, dtype=pl.String)
+                ).alias("gender"),
+            ]
+
+        measure_expressions = [
+            self._polars_clean_string("numero_viajes")
+            .str.replace(r"\.0+$", "")
+            .alias("number_of_trips"),
+            self._polars_numeric("personas", strip_thousands=True).alias("people"),
+        ]
+        expressions = base_expressions + demographic_expressions + measure_expressions
+        if self.version == 1:
+            expressions += [
+                pl.lit(None, dtype=pl.String).alias("age"),
+                pl.lit(None, dtype=pl.String).alias("gender"),
+            ]
+
+        return lazy_frame.select(expressions).drop_nulls(
+            ["date", "overnight_stay_area", "number_of_trips", "people"]
+        )
+
+    def _process_number_of_trips_files_polars(self, filepaths, as_pandas=True):
+        """Execute one optimized Polars plan across number-of-trips files."""
+        filepaths = self._valid_input_files(filepaths)
+        if not filepaths:
+            return None
+        try:
+            query = self._build_number_of_trips_lazy_polars(filepaths)
+            if query is None:
+                return None
+            result = query.collect(engine="streaming")
+            if result.is_empty():
+                return None
+            return self._polars_to_pandas(result) if as_pandas else result
+        except Exception as exc:
+            print(f"Error processing number-of-trips data with Polars: {exc}")
+            return None
 
     def _process_single_overnight_file(self, filepath: str):
         """
         Parse and normalize one overnight stays file.
         """
+        if self.backend == "polars":
+            return self._process_overnight_files_polars([filepath])
+
         try:
             df = self._read_pipe_file(
                 filepath,
@@ -689,6 +1105,9 @@ class Mobility:
         """
         Parse and normalize one number-of-trips file for the active version.
         """
+        if self.backend == "polars":
+            return self._process_number_of_trips_files_polars([filepath])
+
         try:
             if self.version == 2:
                 dtype = {
@@ -758,6 +1177,27 @@ class Mobility:
             print(f"Error processing {filepath}: {e}")
             return None
 
+    def _process_tabular_files(self, local_list, processor):
+        """Run a pandas/Arrow file processor, optionally through Dask."""
+        processed = None
+        if self.use_dask and len(local_list) > 1:
+            delayed_tasks = [delayed(processor)(filepath) for filepath in local_list]
+            try:
+                processed = dd.compute(*delayed_tasks)
+            except Exception as exc:
+                print(
+                    f"Dask computation failed: {exc}. "
+                    "Falling back to sequential processing..."
+                )
+
+        if processed is None:
+            processed = [processor(filepath) for filepath in tqdm.tqdm(local_list)]
+
+        valid_frames = [frame for frame in processed if frame is not None]
+        if not valid_frames:
+            return None
+        return pd.concat(valid_frames, ignore_index=True)
+
     def get_overnight_stays_data(self, return_df: bool = False):
         """
         Function to download and save the overnight stays data.
@@ -782,48 +1222,33 @@ class Mobility:
         3  2023-04-01          01001            01058_AM    18.939
         4  2023-04-01          01001               01059   144.118
         """
-        if self.version == 2:
-            m_type = 'Pernoctaciones'
-            local_list = self._donwload_helper(m_type)
-            print('Generating parquet file for Overnight Stays....')
-
-            if self.use_dask and len(local_list) > 1:
-                @delayed
-                def process_overnight_file(filepath):
-                    return self._process_single_overnight_file(filepath)
-
-                delayed_tasks = [process_overnight_file(f) for f in local_list]
-                try:
-                    processed_dfs = dd.compute(*delayed_tasks)
-                except Exception as e:
-                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
-                    processed_dfs = []
-                    for f in tqdm.tqdm(local_list):
-                        result = self._process_single_overnight_file(f)
-                        if result is not None:
-                            processed_dfs.append(result)
-            else:
-                processed_dfs = []
-                for f in tqdm.tqdm(local_list):
-                    result = self._process_single_overnight_file(f)
-                    if result is not None:
-                        processed_dfs.append(result)
-
-            valid_dfs = [df for df in processed_dfs if df is not None]
-            if not valid_dfs:
-                print("No valid data found")
-                return None
-
-            print('Concatenating all the dataframes....')
-            df = pd.concat(valid_dfs, ignore_index=True)
-            df = self._finalize_backend_dataframe(df)
-            self._saving_parquet(df, m_type)
-            if return_df:
-                return df
-
-        elif self.version == 1:
+        if self.version == 1:
             raise Exception('Overnight stays data is not available for version 1. Please use version 2.')
-        return None
+
+        m_type = "Pernoctaciones"
+        local_list = self._donwload_helper(m_type)
+        print("Generating parquet file for Overnight Stays....")
+
+        if self.backend == "polars":
+            frame = self._process_overnight_files_polars(
+                local_list,
+                as_pandas=False,
+            )
+        else:
+            frame = self._process_tabular_files(
+                local_list,
+                self._process_single_overnight_file,
+            )
+            frame = self._finalize_backend_dataframe(frame)
+
+        if frame is None:
+            print("No valid data found")
+            return None
+
+        self._saving_parquet(frame, m_type)
+        if not return_df:
+            return None
+        return self._polars_to_pandas(frame) if self.backend == "polars" else frame
 
     def get_number_of_trips_data(self, return_df: bool = False):
         """
@@ -849,97 +1274,170 @@ class Mobility:
         3  2023-04-01               01001  0-25    male              2+  129.913
         4  2023-04-01               01001  0-25  female               0  188.744
         """
-        if self.version == 2:
-            m_type = 'Personas'
-            local_list = self._donwload_helper(m_type)
-            print('Generating parquet file for Number of Trips....')
+        m_type = "Personas" if self.version == 2 else "maestra2"
+        local_list = self._donwload_helper(m_type)
+        print("Generating parquet file for Number of Trips....")
 
-            if self.use_dask and len(local_list) > 1:
-                @delayed
-                def process_trips_file(filepath):
-                    return self._process_single_number_of_trips_file(filepath)
+        if self.backend == "polars":
+            frame = self._process_number_of_trips_files_polars(
+                local_list,
+                as_pandas=False,
+            )
+        else:
+            frame = self._process_tabular_files(
+                local_list,
+                self._process_single_number_of_trips_file,
+            )
+            frame = self._finalize_backend_dataframe(frame)
 
-                delayed_tasks = [process_trips_file(f) for f in local_list]
-                try:
-                    processed_dfs = dd.compute(*delayed_tasks)
-                except Exception as e:
-                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
-                    processed_dfs = []
-                    for f in tqdm.tqdm(local_list):
-                        result = self._process_single_number_of_trips_file(f)
-                        if result is not None:
-                            processed_dfs.append(result)
-            else:
-                processed_dfs = []
-                for f in tqdm.tqdm(local_list):
-                    result = self._process_single_number_of_trips_file(f)
-                    if result is not None:
-                        processed_dfs.append(result)
+        if frame is None:
+            print("No valid data found")
+            return None
 
-            valid_dfs = [df for df in processed_dfs if df is not None]
-            if not valid_dfs:
-                print("No valid data found")
-                return None
+        self._saving_parquet(frame, m_type)
+        if not return_df:
+            return None
+        return self._polars_to_pandas(frame) if self.backend == "polars" else frame
 
-            print('Concatenating all the dataframes....')
-            df = pd.concat(valid_dfs, ignore_index=True)
-            df = self._finalize_backend_dataframe(df)
-            self._saving_parquet(df, m_type)
-            if return_df:
-                return df
-
-        if self.version == 1:
-            m_type = 'maestra2'
-            local_list = self._donwload_helper(m_type)
-            print('Generating parquet file for Number of Trips....')
-
-            if self.use_dask and len(local_list) > 1:
-                @delayed
-                def process_trips_file(filepath):
-                    return self._process_single_number_of_trips_file(filepath)
-
-                delayed_tasks = [process_trips_file(f) for f in local_list]
-                try:
-                    processed_dfs = dd.compute(*delayed_tasks)
-                except Exception as e:
-                    print(f"Dask computation failed: {e}. Falling back to pandas processing...")
-                    processed_dfs = []
-                    for f in tqdm.tqdm(local_list):
-                        result = self._process_single_number_of_trips_file(f)
-                        if result is not None:
-                            processed_dfs.append(result)
-            else:
-                processed_dfs = []
-                for f in tqdm.tqdm(local_list):
-                    result = self._process_single_number_of_trips_file(f)
-                    if result is not None:
-                        processed_dfs.append(result)
-
-            valid_dfs = [df for df in processed_dfs if df is not None]
-            if not valid_dfs:
-                print("No valid data found")
-                return None
-
-            print('Concatenating all the dataframes....')
-            df = pd.concat(valid_dfs, ignore_index=True)
-            df = self._finalize_backend_dataframe(df)
-            self._saving_parquet(df, m_type)
-            if return_df:
-                return df
-
-        return None
-
-    def _saving_parquet(self, df: pd.DataFrame, m_type: str):
+    def _saving_parquet(self, df, m_type: str):
         print('Writing the parquet file....')
-        df.to_parquet(
-            os.path.join(self.output_path,
-                         f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}.parquet"),
-            index=False)
-        print('Parquet file generated successfully at ',
-              os.path.join(self.output_path, f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}.parquet"))
+        output_file = os.path.join(
+            self.output_path,
+            f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}.parquet",
+        )
+        if pl is not None and isinstance(df, pl.DataFrame):
+            df.write_parquet(output_file)
+        else:
+            df.to_parquet(output_file, index=False)
+        print('Parquet file generated successfully at ', output_file)
+
+    def get_acquisition_manifest(self, m_type: str = "Viajes") -> pd.DataFrame:
+        """Return the pre-filter file-acquisition record for one data type.
+
+        The manifest is populated by :meth:`_donwload_helper` and has one row
+        per requested date.  ``status='available'`` means a non-empty source
+        file was obtained locally. After ``get_od_data()``, ``parse_status``
+        distinguishes valid, genuinely empty, and invalid source files. Pass
+        this table to ``build_temporal_network`` for coverage-aware averages.
+        """
+        if m_type not in self._acquisition_manifests:
+            raise ValueError(
+                "No acquisition manifest is available for %r. Run the "
+                "corresponding data download first." % m_type
+            )
+        outcomes = getattr(self, "_od_processing_outcomes", {})
+        if m_type in outcomes:
+            filepaths, processed_success = outcomes.pop(m_type)
+            self._finalize_od_manifest(
+                m_type, filepaths, processed_success=processed_success
+            )
+        return self._acquisition_manifests[m_type].copy()
+
+    def _remember_od_processing(
+        self, m_type: str, filepaths, processed_success: bool
+    ) -> None:
+        """Defer expensive per-file validation until coverage is requested."""
+        if m_type in self._acquisition_manifests:
+            self._od_processing_outcomes[m_type] = (
+                tuple(filepaths), processed_success
+            )
+
+    def _finalize_od_manifest(
+        self, m_type: str, filepaths, *, processed_success: bool
+    ) -> None:
+        """Record whether each acquired OD file survived mandatory parsing.
+
+        All mandatory fields are checked before optional analytical filtering.
+        A partly invalid file is marked failed rather than presenting the
+        surviving rows as a complete observed day.
+        """
+        if m_type not in self._acquisition_manifests or not filepaths:
+            return
+        manifest = self._acquisition_manifests[m_type]
+        available = manifest["status"].eq("available")
+        if not available.any():
+            return
+        try:
+            source = self._scan_pipe_files_polars(filepaths, include_file_paths=True)
+            mandatory = {"fecha", "periodo", "origen", "destino", "viajes", "viajes_km"}
+            if not mandatory.issubset(source.collect_schema().names()):
+                raise ValueError("OD source lacks mandatory columns")
+            selected = source.select(
+                pl.col("_source_path"),
+                self._polars_date("fecha")
+                .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                .alias("_date"),
+                self._polars_identifier("origen").alias("_origin"),
+                self._polars_identifier("destino").alias("_destination"),
+                self._polars_numeric("viajes", strip_thousands=True).alias("_weight"),
+                self._polars_numeric("viajes_km", strip_thousands=True).alias("_length"),
+            )
+            diagnostics = (
+                selected.group_by("_source_path")
+                .agg(
+                    pl.len().alias("row_count"),
+                    (
+                        pl.col("_date").is_null()
+                        | pl.col("_origin").is_null()
+                        | pl.col("_origin").eq("")
+                        | pl.col("_destination").is_null()
+                        | pl.col("_destination").eq("")
+                        | pl.col("_weight").is_null()
+                        | ~pl.col("_weight").is_finite()
+                        | (pl.col("_weight") < 0)
+                        | pl.col("_length").is_null()
+                        | ~pl.col("_length").is_finite()
+                        | (pl.col("_length") < 0)
+                    )
+                    .sum()
+                    .alias("invalid_rows"),
+                    pl.col("_date").drop_nulls().unique().alias("dates"),
+                )
+                .collect(engine="streaming")
+            )
+            by_path = {
+                os.path.abspath(row["_source_path"]): row
+                for row in diagnostics.to_dicts()
+            }
+            for index in manifest.index[available]:
+                path = manifest.at[index, "local_path"]
+                row = by_path.get(os.path.abspath(path)) if path else None
+                if row is None:
+                    manifest.at[index, "parse_status"] = "empty"
+                elif (
+                    not processed_success
+                    or row["invalid_rows"]
+                    or row["dates"] != [pd.Timestamp(manifest.at[index, "date"]).date()]
+                ):
+                    manifest.at[index, "parse_status"] = "failed"
+                else:
+                    manifest.at[index, "parse_status"] = "valid"
+        except Exception as exc:
+            manifest.loc[available, "parse_status"] = "failed"
+            print(f"[warn] OD source validation failed: {exc}")
+        failed_dates = manifest.loc[
+            available & manifest["parse_status"].eq("failed"), "date"
+        ].tolist()
+        if failed_dates:
+            warnings.warn(
+                "OD source parsing failed for these dates; they will not count "
+                "as observed days: %s" % failed_dates[:5],
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _set_acquisition_manifest(self, m_type: str, records) -> None:
+        """Store one immutable-in-practice, date-level acquisition record."""
+        self._acquisition_manifests[m_type] = pd.DataFrame(
+            records,
+            columns=["date", "mobility_type", "status", "coverage", "local_path", "error"],
+        )
+        self._acquisition_manifests[m_type]["parse_status"] = "not_processed"
+        getattr(self, "_od_processing_outcomes", {}).pop(m_type, None)
 
     def _donwload_helper(self, m_type:str):
         local_list = []
+        records = []
         if self.version == 2:
             for d in self.dates:
                 d_first = d[:7]
@@ -950,11 +1448,21 @@ class Mobility:
                     download_url = f"https://movilidad-opendata.mitma.es/estudios_basicos/por-{self.zones}/{m_type.lower()}/ficheros-diarios/{d_first}/{d_second}_{m_type}_{self.zones}.csv.gz"
 
                 print('Downloading file from', download_url)
+                local_path = os.path.join(
+                    self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"
+                )
                 try:
-                    utils.download_file_if_not_existing(download_url,os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
-                    local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"))
+                    utils.download_file_if_not_existing(download_url, local_path)
+                    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                        local_list.append(local_path)
+                        records.append(
+                            [d, m_type, "available", "unverified", local_path, None]
+                        )
+                    else:
+                        records.append([d, m_type, "empty", "unknown", local_path, None])
                 except Exception as exc:
                     print(f"[warn] Failed to download {download_url}: {exc}")
+                    records.append([d, m_type, "failed", "unknown", None, str(exc)])
                     continue
         elif self.version == 1:
 
@@ -964,11 +1472,22 @@ class Mobility:
             for d in self.dates:
                 d_first = d[:7]
                 d_second = d.replace("-", "")
+                local_path = os.path.join(
+                    self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"
+                )
                 try:
                     url_base = f"https://opendata-movilidad.mitma.es/{m_type}-mitma-{self.zones}/ficheros-diarios/{d_first}/{d_second}_{m_type[:-1]}_{m_type[-1]}_mitma_{self.zones[:-1]}.txt.gz"
-                    utils.download_file_if_not_existing(url_base, os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
-                    local_list.append(os.path.join(self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"))
+                    utils.download_file_if_not_existing(url_base, local_path)
+                    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                        local_list.append(local_path)
+                        records.append(
+                            [d, m_type, "available", "unverified", local_path, None]
+                        )
+                    else:
+                        records.append([d, m_type, "empty", "unknown", local_path, None])
                 except Exception as exc:
                     print(f"[warn] Failed to download {url_base}: {exc}")
+                    records.append([d, m_type, "failed", "unknown", None, str(exc)])
                     continue
+        self._set_acquisition_manifest(m_type, records)
         return local_list

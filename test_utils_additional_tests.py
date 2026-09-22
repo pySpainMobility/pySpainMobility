@@ -1,6 +1,7 @@
 import io
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from pyspainmobility.utils import utils
@@ -209,7 +210,7 @@ def test_available_mobility_data_multi_entry_mixed_download_status(monkeypatch, 
     assert bool(df.loc[0, "downloaded"]) is True
     assert str(df.loc[0, "local_path"]).endswith("_v2.csv.gz")
     assert bool(df.loc[1, "downloaded"]) is False
-    assert df.loc[1, "local_path"] is None
+    assert pd.isna(df.loc[1, "local_path"])
     assert bool(df.loc[2, "downloaded"]) is True
     assert str(df.loc[2, "local_path"]).endswith("20230103_Viajes_municipios.csv.gz")
 
