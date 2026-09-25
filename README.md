@@ -138,8 +138,9 @@ OD results are saved only after every requested daily download and source file
 has been checked. A missing download or invalid OD day raises an error and is
 recorded by `get_acquisition_manifest("Viajes")`. To work deliberately with
 incomplete data, pass `allow_partial=True`: failed OD days are excluded, and
-the saved filename ends in `_partial.parquet`. Overnight stays and trip-count
-downloads also require every requested file unless `allow_partial=True`.
+the saved filename ends in `_partial.parquet`. Overnight stays and trip counts
+apply the same date-level source validation, including non-negative finite
+people counts and agreement between each file's date and its requested day.
 
 The default OD output retains its original filename. `keep_activity=True`
 adds `_activity`, and `social_agg=True` adds `_social` before `.parquet`, so

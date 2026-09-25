@@ -1102,6 +1102,41 @@ def test_mobility_manifest_excludes_invalid_parsed_day_from_temporal_mean(tmp_pa
         temporal.mean_per_observed_day(["2024-01-02"])
 
 
+def test_node_index_equality_and_hash_follow_ordered_scientific_identity():
+    index = NodeIndex(["A", "B"], zoning_id="municipality", zoning_version="2")
+    equal = NodeIndex(["A", "B"], zoning_id="municipality", zoning_version="2")
+    reordered = NodeIndex(["B", "A"], zoning_id="municipality", zoning_version="2")
+    other_version = NodeIndex(["A", "B"], zoning_id="municipality", zoning_version="1")
+
+    assert index == equal
+    assert hash(index) == hash(equal)
+    assert len({index, equal, reordered, other_version}) == 3
+    assert index != reordered
+    assert index != other_version
+    assert index != ["A", "B"]
+
+
+def test_sparse_network_equality_compares_values_without_sparse_truth_errors():
+    od = pl.DataFrame(
+        {
+            "id_origin": ["A", "B"],
+            "id_destination": ["B", "A"],
+            "n_trips": [1.0, 2.0],
+        }
+    )
+    first = build_network(od)
+    same = build_network(od)
+    changed = build_network(
+        od.with_columns(pl.when(pl.col("id_origin") == "B").then(3.0).otherwise(1.0).alias("n_trips"))
+    )
+
+    assert first == same
+    assert first != changed
+    assert first != object()
+    with pytest.raises(TypeError):
+        hash(first)
+
+
 def test_mobility_od_pipeline_validates_manifest_before_saving(
     tmp_path, monkeypatch
 ):

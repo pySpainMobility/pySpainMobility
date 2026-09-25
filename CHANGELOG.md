@@ -11,6 +11,20 @@ All notable changes to this project are documented in this file.
   columns, so requesting them now raises a clear error.
 
 ### Fixed
+- Validate every overnight-stay and trip-count source day before publishing a
+  complete period. Reject malformed rows, missing identifiers, date mismatches,
+  and negative or non-finite people counts; exclude failed days from explicit
+  partial results. Detect source days omitted by a processing backend.
+- Make `NodeIndex` equality and hashing use ordered node IDs and zoning
+  metadata, including indexes with multiple nodes. Compare sparse networks by
+  their canonical matrix, node index, metadata, and provenance.
+- Reject Boolean/float version values and impossible calendar dates; treat
+  whitespace-padded missing ID markers as missing in zoning relations and
+  geometries.
+- Normalize padded missing markers in optional OD activity and demographic
+  fields and in trip-count demographics, avoiding spurious categories.
+- Warn when callers request unsupported version-1 OD social aggregation instead
+  of silently returning a result without those dimensions.
 - Refuse to save date-range outputs when daily downloads are missing, or OD
   source days contain invalid mandatory rows; explicitly requested partial OD
   results exclude invalid days and use a `_partial` filename suffix.
@@ -27,6 +41,8 @@ All notable changes to this project are documented in this file.
   for subnormal positive weights.
 
 ### Changed
+- Collect per-file date and mandatory-field diagnostics in one streaming
+  Polars scan instead of separate diagnostic and date scans.
 - Require GeoPandas 1.1.4 or newer in its 1.1 series for the SQL injection fix
   and subsequent `to_postgis` hardening. This raises the minimum supported
   Python version to 3.10 and pandas version to 2.0.

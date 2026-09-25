@@ -374,10 +374,19 @@ class Mobility:
         separators (e.g. '01001.0' -> '01001', '28.079' -> '28079').
         """
         normalized = series.astype("string").str.strip()
-        normalized = normalized.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "None": pd.NA})
+        normalized = normalized.mask(
+            normalized.str.lower().isin({"", "na", "nan", "none", "null"})
+        )
         normalized = normalized.str.replace(r"\.0+$", "", regex=True)
         normalized = normalized.str.replace(r"(?<=\d)\.(?=\d)", "", regex=True)
         return normalized
+
+    @staticmethod
+    def _normalize_optional_string_series(series: pd.Series) -> pd.Series:
+        """Preserve optional labels while treating padded markers as missing."""
+        normalized = series.astype("string").str.strip()
+        missing = normalized.str.lower().isin({"", "na", "nan", "none", "null"})
+        return normalized.mask(missing)
 
     @staticmethod
     def _normalize_date_series(series: pd.Series) -> pd.Series:
@@ -453,7 +462,10 @@ class Mobility:
     def _polars_nullable_string(column: str):
         """Normalize missing text markers after trimming source whitespace."""
         cleaned = Mobility._polars_clean_string(column)
-        return pl.when(cleaned.is_in(["", "NA", "nan", "None"])).then(None).otherwise(cleaned)
+        missing = cleaned.str.to_lowercase().is_in(
+            ["", "na", "nan", "none", "null"]
+        )
+        return pl.when(missing).then(None).otherwise(cleaned)
 
     @staticmethod
     def _polars_numeric(column: str, strip_thousands: bool = False):
@@ -616,7 +628,7 @@ class Mobility:
         if keep_activity:
             for source in ("actividad_origen", "actividad_destino"):
                 expression = (
-                    self._polars_clean_string(source).replace(_ACTIVITY_TRANSLATIONS)
+                    self._polars_nullable_string(source).replace(_ACTIVITY_TRANSLATIONS)
                     if source in source_columns
                     else pl.lit(None, dtype=pl.String)
                 )
@@ -625,7 +637,7 @@ class Mobility:
         if social_agg:
             for source in ("renta", "edad", "sexo"):
                 expression = (
-                    self._polars_clean_string(source)
+                    self._polars_nullable_string(source)
                     if source in source_columns
                     else pl.lit(None, dtype=pl.String)
                 )
@@ -801,6 +813,7 @@ class Mobility:
         for optional_col in ["activity_origin", "activity_destination", "income", "age", "gender"]:
             if optional_col not in df.columns:
                 df[optional_col] = pd.NA
+            df[optional_col] = self._normalize_optional_string_series(df[optional_col])
 
         df["date"] = self._normalize_date_series(df["date"])
         df["id_origin"] = self._normalize_identifier_series(df["id_origin"])
@@ -876,13 +889,15 @@ class Mobility:
         return bool(incomplete)
 
     def _check_od_processing_coverage(
-        self, m_type: str, filepaths, processed_success: bool, allow_partial: bool
+        self, m_type: str, filepaths, frame, allow_partial: bool
     ) -> bool:
         """Validate OD source files before saving their processed result."""
-        self._remember_od_processing(m_type, filepaths, processed_success)
+        self._remember_od_processing(m_type, filepaths, frame is not None)
         if m_type not in self._acquisition_manifests:
             return False
-        manifest = self.get_acquisition_manifest(m_type)
+        self.get_acquisition_manifest(m_type)
+        self._mark_unrepresented_valid_days(m_type, frame)
+        manifest = self._acquisition_manifests[m_type]
         incomplete = manifest.loc[
             manifest["status"].ne("available")
             | manifest["parse_status"].eq("failed"),
@@ -896,7 +911,56 @@ class Mobility:
             )
         return bool(incomplete)
 
-    def _keep_valid_od_days(self, frame, m_type: str):
+    def _check_tabular_processing_coverage(
+        self, m_type: str, frame, allow_partial: bool
+    ) -> bool:
+        """Check each overnight/trip-count source before publishing its result."""
+        if m_type not in self._acquisition_manifests:
+            return False
+        self._finalize_tabular_manifest(m_type)
+        self._mark_unrepresented_valid_days(m_type, frame)
+        manifest = self._acquisition_manifests[m_type]
+        incomplete = manifest.loc[
+            manifest["status"].ne("available")
+            | manifest["parse_status"].eq("failed"),
+            "date",
+        ].tolist()
+        if incomplete and not allow_partial:
+            raise RuntimeError(
+                "Cannot publish incomplete %s data; missing or invalid dates: %s. "
+                "Review get_acquisition_manifest() or pass allow_partial=True."
+                % (m_type, incomplete[:5])
+            )
+        return bool(incomplete)
+
+    def _mark_unrepresented_valid_days(self, m_type: str, frame) -> None:
+        """A parsed day must also be present in the final processed table."""
+        manifest = self._acquisition_manifests[m_type]
+        represented = set()
+        if frame is not None:
+            if pl is not None and isinstance(frame, pl.DataFrame):
+                represented = set(frame.get_column("date").unique().to_list())
+            else:
+                represented = set(frame["date"].unique().tolist())
+        unexpected = represented - set(manifest["date"])
+        if unexpected and not manifest["parse_status"].eq("failed").any():
+            raise RuntimeError(
+                "Processed %s data contains dates outside the requested range: %s"
+                % (m_type, sorted(unexpected)[:5])
+            )
+        missing = manifest["parse_status"].eq("valid") & ~manifest["date"].isin(
+            represented
+        )
+        if missing.any():
+            manifest.loc[missing, "parse_status"] = "failed"
+            warnings.warn(
+                "%s processing omitted valid source dates: %s"
+                % (m_type, manifest.loc[missing, "date"].tolist()[:5]),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _keep_valid_source_days(self, frame, m_type: str):
         """Exclude entire invalid source days from an explicit partial result."""
         manifest = self._acquisition_manifests.get(m_type)
         if manifest is None:
@@ -907,6 +971,12 @@ class Mobility:
         if pl is not None and isinstance(frame, pl.DataFrame):
             return frame.filter(pl.col("date").is_in(valid_days))
         return frame.loc[frame["date"].isin(valid_days)].copy()
+
+    @staticmethod
+    def _frame_is_empty(frame) -> bool:
+        if pl is not None and isinstance(frame, pl.DataFrame):
+            return frame.is_empty()
+        return frame.empty
 
     def get_od_data(
         self,
@@ -968,6 +1038,13 @@ class Mobility:
                     "Version 1 municipality OD files do not contain activity columns. "
                     "Use zones='districts' or keep_activity=False."
                 )
+            if social_agg:
+                warnings.warn(
+                    "Version 1 OD data has no supported social aggregation; "
+                    "social_agg=True is ignored.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             social_agg = False
 
         local_list = self._donwload_helper(m_type)
@@ -982,13 +1059,13 @@ class Mobility:
                 as_pandas=False,
             )
             processing_partial = self._check_od_processing_coverage(
-                m_type, local_list, frame is not None, allow_partial
+                m_type, local_list, frame, allow_partial
             )
             if frame is None:
                 print("No valid data found")
                 return None
             if processing_partial:
-                frame = self._keep_valid_od_days(frame, m_type)
+                frame = self._keep_valid_source_days(frame, m_type)
                 if frame.is_empty():
                     print("No valid data found")
                     return None
@@ -1020,7 +1097,7 @@ class Mobility:
                 frames.append(result)
 
         if not frames:
-            self._check_od_processing_coverage(m_type, local_list, False, allow_partial)
+            self._check_od_processing_coverage(m_type, local_list, None, allow_partial)
             print("No valid data found")
             return None
 
@@ -1028,10 +1105,10 @@ class Mobility:
         frame = frames[0] if len(frames) == 1 else pd.concat(frames)
         frame = self._finalize_backend_dataframe(frame)
         processing_partial = self._check_od_processing_coverage(
-            m_type, local_list, True, allow_partial
+            m_type, local_list, frame, allow_partial
         )
         if processing_partial:
-            frame = self._keep_valid_od_days(frame, m_type)
+            frame = self._keep_valid_source_days(frame, m_type)
             if frame.empty:
                 print("No valid data found")
                 return None
@@ -1075,7 +1152,7 @@ class Mobility:
         valid_dfs = [df for df in processed_dfs if df is not None]
         
         if not valid_dfs:
-            self._check_od_processing_coverage(m_type, local_list, False, allow_partial)
+            self._check_od_processing_coverage(m_type, local_list, None, allow_partial)
             print("No valid data found")
             return None
         
@@ -1083,10 +1160,10 @@ class Mobility:
         df = pd.concat(valid_dfs, ignore_index=True)
         df = self._finalize_backend_dataframe(df)
         processing_partial = self._check_od_processing_coverage(
-            m_type, local_list, True, allow_partial
+            m_type, local_list, df, allow_partial
         )
         if processing_partial:
-            df = self._keep_valid_od_days(df, m_type)
+            df = self._keep_valid_source_days(df, m_type)
             if df.empty:
                 print("No valid data found")
                 return None
@@ -1128,6 +1205,7 @@ class Mobility:
             .drop_nulls(
                 ["date", "residence_area", "overnight_stay_area", "people"]
             )
+            .filter(pl.col("people").is_finite() & (pl.col("people") >= 0))
         )
 
     def _process_overnight_files_polars(self, filepaths, as_pandas=True):
@@ -1161,12 +1239,12 @@ class Mobility:
         if self.version == 2:
             demographic_expressions = [
                 (
-                    self._polars_clean_string("edad")
+                    self._polars_nullable_string("edad")
                     if "edad" in source_columns
                     else pl.lit(None, dtype=pl.String)
                 ).alias("age"),
                 (
-                    self._polars_clean_string("sexo").replace(
+                    self._polars_nullable_string("sexo").replace(
                         {"hombre": "male", "mujer": "female"}
                     )
                     if "sexo" in source_columns
@@ -1175,7 +1253,7 @@ class Mobility:
             ]
 
         measure_expressions = [
-            self._polars_clean_string("numero_viajes")
+            self._polars_nullable_string("numero_viajes")
             .str.replace(r"\.0+$", "")
             .alias("number_of_trips"),
             self._polars_numeric("personas", strip_thousands=True).alias("people"),
@@ -1187,8 +1265,10 @@ class Mobility:
                 pl.lit(None, dtype=pl.String).alias("gender"),
             ]
 
-        return lazy_frame.select(expressions).drop_nulls(
-            ["date", "overnight_stay_area", "number_of_trips", "people"]
+        return (
+            lazy_frame.select(expressions)
+            .drop_nulls(["date", "overnight_stay_area", "number_of_trips", "people"])
+            .filter(pl.col("people").is_finite() & (pl.col("people") >= 0))
         )
 
     def _process_number_of_trips_files_polars(self, filepaths, as_pandas=True):
@@ -1248,6 +1328,11 @@ class Mobility:
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
             df["people"] = self._to_numeric(df["people"], strip_thousands=True)
             df.dropna(subset=required_cols, inplace=True)
+            valid_people = (
+                np.isfinite(df["people"].to_numpy(dtype=float))
+                & df["people"].ge(0).to_numpy(dtype=bool)
+            )
+            df = df.loc[valid_people]
 
             return df
         except EmptyDataError:
@@ -1317,13 +1402,21 @@ class Mobility:
             if "gender" not in df.columns:
                 df["gender"] = pd.NA
 
+            df["age"] = self._normalize_optional_string_series(df["age"])
+            df["gender"] = self._normalize_optional_string_series(df["gender"])
+
             df["date"] = self._normalize_date_series(df["date"])
             df["overnight_stay_area"] = self._normalize_identifier_series(df["overnight_stay_area"])
-            df["number_of_trips"] = df["number_of_trips"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
+            df["number_of_trips"] = self._normalize_identifier_series(df["number_of_trips"])
             df["people"] = self._to_numeric(df["people"], strip_thousands=True)
 
             df.replace({"gender": {"hombre": "male", "mujer": "female"}}, inplace=True)
             df.dropna(subset=["date", "overnight_stay_area", "number_of_trips", "people"], inplace=True)
+            valid_people = (
+                np.isfinite(df["people"].to_numpy(dtype=float))
+                & df["people"].ge(0).to_numpy(dtype=bool)
+            )
+            df = df.loc[valid_people]
 
             return df
         except EmptyDataError:
@@ -1363,8 +1456,8 @@ class Mobility:
         return_df : bool
             Default value is False. If True, the function will return the dataframe in addition to saving it to a file.
         allow_partial : bool
-            Save with a ``_partial`` suffix if any requested daily download failed.
-            By default, missing days raise an error before saving.
+            Save only valid days with a ``_partial`` suffix if a requested
+            download or source file fails. By default, raise before saving.
         Examples
         --------
 
@@ -1401,11 +1494,21 @@ class Mobility:
             )
             frame = self._finalize_backend_dataframe(frame)
 
+        processing_partial = self._check_tabular_processing_coverage(
+            m_type, frame, allow_partial
+        )
+
         if frame is None:
             print("No valid data found")
             return None
 
-        self._saving_parquet(frame, m_type, partial=partial)
+        if processing_partial:
+            frame = self._keep_valid_source_days(frame, m_type)
+            if self._frame_is_empty(frame):
+                print("No valid data found")
+                return None
+
+        self._saving_parquet(frame, m_type, partial=partial or processing_partial)
         if not return_df:
             return None
         return self._polars_to_pandas(frame) if self.backend == "polars" else frame
@@ -1419,8 +1522,8 @@ class Mobility:
         return_df : bool
             Default value is False. If True, the function will return the dataframe in addition to saving it to a file.
         allow_partial : bool
-            Save with a ``_partial`` suffix if any requested daily download failed.
-            By default, missing days raise an error before saving.
+            Save only valid days with a ``_partial`` suffix if a requested
+            download or source file fails. By default, raise before saving.
         Examples
         --------
 
@@ -1454,11 +1557,21 @@ class Mobility:
             )
             frame = self._finalize_backend_dataframe(frame)
 
+        processing_partial = self._check_tabular_processing_coverage(
+            m_type, frame, allow_partial
+        )
+
         if frame is None:
             print("No valid data found")
             return None
 
-        self._saving_parquet(frame, m_type, partial=partial)
+        if processing_partial:
+            frame = self._keep_valid_source_days(frame, m_type)
+            if self._frame_is_empty(frame):
+                print("No valid data found")
+                return None
+
+        self._saving_parquet(frame, m_type, partial=partial or processing_partial)
         if not return_df:
             return None
         return self._polars_to_pandas(frame) if self.backend == "polars" else frame
@@ -1512,9 +1625,10 @@ class Mobility:
 
         The manifest is populated by :meth:`_donwload_helper` and has one row
         per requested date.  ``status='available'`` means a non-empty source
-        file was obtained locally. After ``get_od_data()``, ``parse_status``
-        distinguishes valid, genuinely empty, and invalid source files. Pass
-        this table to ``build_temporal_network`` for coverage-aware averages.
+        file was obtained locally. After a public processing call,
+        ``parse_status`` distinguishes valid, genuinely empty, and invalid
+        source files. The OD manifest can be passed to
+        ``build_temporal_network`` for coverage-aware averages.
         """
         if m_type not in self._acquisition_manifests:
             raise ValueError(
@@ -1551,8 +1665,80 @@ class Mobility:
             for line_number, row in enumerate(rows, start=2):
                 if len(row) != width:
                     raise ValueError(
-                        f"OD source row {line_number} has {len(row)} fields; expected {width}."
+                        f"Source row {line_number} has {len(row)} fields; expected {width}."
                     )
+
+    def _finalize_tabular_manifest(self, m_type: str) -> None:
+        """Validate mandatory fields in each overnight or trip-count file."""
+        if m_type not in self._acquisition_manifests:
+            return
+        manifest = self._acquisition_manifests[m_type]
+        available = manifest["status"].eq("available")
+        area_source = "zona_pernoctacion" if self.version == 2 else "distrito"
+        for index in manifest.index[available]:
+            path = manifest.at[index, "local_path"]
+            try:
+                self._validate_pipe_width(path)
+                source = self._scan_pipe_files_polars(path)
+                if m_type == "Pernoctaciones":
+                    mandatory = {
+                        "fecha", "zona_residencia", "zona_pernoctacion", "personas"
+                    }
+                    identifiers = [
+                        self._polars_identifier("zona_residencia").alias("_residence"),
+                        self._polars_identifier("zona_pernoctacion").alias("_area"),
+                    ]
+                    id_columns = ["_residence", "_area"]
+                else:
+                    mandatory = {"fecha", area_source, "numero_viajes", "personas"}
+                    identifiers = [
+                        self._polars_identifier(area_source).alias("_area"),
+                        self._polars_nullable_string("numero_viajes").alias("_count"),
+                    ]
+                    id_columns = ["_area", "_count"]
+                if not mandatory.issubset(source.collect_schema().names()):
+                    raise ValueError("Source lacks mandatory columns")
+                selected = source.select(
+                    self._polars_date("fecha")
+                    .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    .alias("_date"),
+                    *identifiers,
+                    self._polars_numeric("personas", strip_thousands=True).alias("_people"),
+                )
+                expected_date = pd.Timestamp(manifest.at[index, "date"]).date()
+                invalid = (
+                    pl.col("_date").is_null()
+                    | (pl.col("_date") != pl.lit(expected_date))
+                    | pl.col("_people").is_null()
+                    | ~pl.col("_people").is_finite()
+                    | (pl.col("_people") < 0)
+                )
+                for column in id_columns:
+                    invalid = invalid | pl.col(column).is_null() | pl.col(column).eq("")
+                diagnostics = selected.select(
+                    pl.len().alias("row_count"),
+                    invalid.sum().alias("invalid_rows"),
+                ).collect(engine="streaming")
+                row = diagnostics.row(0, named=True)
+                if not row["row_count"]:
+                    manifest.at[index, "parse_status"] = "empty"
+                elif row["invalid_rows"]:
+                    manifest.at[index, "parse_status"] = "failed"
+                else:
+                    manifest.at[index, "parse_status"] = "valid"
+            except Exception as exc:
+                manifest.at[index, "parse_status"] = "failed"
+                print(f"[warn] Source validation failed for {path}: {exc}")
+        failed_dates = manifest.loc[
+            available & manifest["parse_status"].eq("failed"), "date"
+        ].tolist()
+        if failed_dates:
+            warnings.warn(
+                "%s source parsing failed for these dates: %s"
+                % (m_type, failed_dates[:5]),
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     def _finalize_od_manifest(
         self, m_type: str, filepaths, *, processed_success: bool
@@ -1563,7 +1749,7 @@ class Mobility:
         A partly invalid file is marked failed rather than presenting the
         surviving rows as a complete observed day.
         """
-        if m_type not in self._acquisition_manifests or not filepaths:
+        if m_type not in self._acquisition_manifests:
             return
         manifest = self._acquisition_manifests[m_type]
         available = manifest["status"].eq("available")
@@ -1587,10 +1773,12 @@ class Mobility:
                     self._polars_numeric("viajes", strip_thousands=True).alias("_weight"),
                     self._polars_numeric("viajes_km", strip_thousands=True).alias("_length"),
                 )
+                expected_date = pd.Timestamp(manifest.at[index, "date"]).date()
                 diagnostics_query = selected.select(
                     pl.len().alias("row_count"),
                     (
                         pl.col("_date").is_null()
+                        | (pl.col("_date") != pl.lit(expected_date))
                         | pl.col("_hour").is_null()
                         | pl.col("_origin").is_null()
                         | pl.col("_origin").eq("")
@@ -1604,18 +1792,13 @@ class Mobility:
                         | (pl.col("_length") < 0)
                     ).sum().alias("invalid_rows"),
                 )
-                dates_query = selected.select("_date").drop_nulls().unique()
-                diagnostics, dates = pl.collect_all(
-                    [diagnostics_query, dates_query]
-                )
+                diagnostics = diagnostics_query.collect(engine="streaming")
                 row = diagnostics.row(0, named=True)
                 if not row["row_count"]:
                     manifest.at[index, "parse_status"] = "empty"
                 elif (
                     not processed_success
                     or row["invalid_rows"]
-                    or dates.get_column("_date").to_list()
-                    != [pd.Timestamp(manifest.at[index, "date"]).date()]
                 ):
                     manifest.at[index, "parse_status"] = "failed"
                 else:

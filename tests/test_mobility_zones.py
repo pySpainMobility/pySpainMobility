@@ -657,7 +657,8 @@ def test_get_od_data_version1_keeps_and_translates_activity(
     _write_gzip(file_path, content)
     monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
 
-    df = mobility.get_od_data(keep_activity=True, social_agg=True, return_df=True)
+    with pytest.warns(RuntimeWarning, match="social_agg=True is ignored"):
+        df = mobility.get_od_data(keep_activity=True, social_agg=True, return_df=True)
 
     assert list(df.columns) == [
         "date",
@@ -994,6 +995,174 @@ def test_other_daily_outputs_reject_missing_downloads(
     assert next(Path(mobility.output_path).glob("*.parquet")).name.endswith(
         "_partial.parquet"
     )
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+@pytest.mark.parametrize(
+    "invalid_case", ["negative", "non_finite", "missing", "extra_field", "wrong_date"]
+)
+@pytest.mark.parametrize(
+    "method_name,header,good_template,invalid_template,m_type",
+    [
+        (
+            "get_overnight_stays_data",
+            "fecha|zona_residencia|zona_pernoctacion|personas\n",
+            "{day}|A|B|2\n",
+            "{day}|C|D|3",
+            "Pernoctaciones",
+        ),
+        (
+            "get_number_of_trips_data",
+            "fecha|zona_pernoctacion|numero_viajes|personas\n",
+            "{day}|A|1|2\n",
+            "{day}|C|2|3",
+            "Personas",
+        ),
+    ],
+)
+def test_tabular_source_failure_never_publishes_a_complete_period(
+    monkeypatch, tmp_path, backend, invalid_case,
+    method_name, header, good_template, invalid_template, m_type,
+):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend=backend, end_date="2022-01-02"
+    )
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility)
+    )
+
+    def fake_download(_url, path):
+        day = "20220102" if "20220102" in path else "20220101"
+        content = header + good_template.format(day=day)
+        if day == "20220102":
+            invalid = invalid_template.format(day=day)
+            if invalid_case == "negative":
+                invalid = invalid.rsplit("|", 1)[0] + "|-1"
+            elif invalid_case == "non_finite":
+                invalid = invalid.rsplit("|", 1)[0] + "|NaN"
+            elif invalid_case == "missing":
+                fields = invalid.split("|")
+                fields[2] = " NA "
+                invalid = "|".join(fields)
+            elif invalid_case == "extra_field":
+                invalid += "|extra"
+            else:
+                invalid = invalid.replace(day, "20220103", 1)
+            content += invalid + "\n"
+        _write_gzip(Path(path), content)
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    method = getattr(mobility, method_name)
+    with pytest.warns(RuntimeWarning, match="source parsing failed"):
+        with pytest.raises(RuntimeError, match="invalid dates"):
+            method(return_df=True)
+    assert list(Path(mobility.output_path).glob("*.parquet")) == []
+    assert mobility.get_acquisition_manifest(m_type)["parse_status"].tolist() == [
+        "valid", "failed"
+    ]
+
+    with pytest.warns(RuntimeWarning, match="source parsing failed"):
+        result = method(return_df=True, allow_partial=True)
+    assert result["date"].tolist() == ["2022-01-01"]
+    saved = next(Path(mobility.output_path).glob("*.parquet"))
+    assert saved.name.endswith("_partial.parquet")
+    assert mobility_module.pl.read_parquet(saved)["date"].to_list() == [
+        "2022-01-01"
+    ]
+
+
+@pytest.mark.parametrize(
+    "method_name,processor_name,source",
+    [
+        (
+            "get_od_data",
+            "_process_od_files_polars",
+            "fecha|periodo|origen|destino|viajes|viajes_km\n"
+            "{day}|0|A|B|2|4\n",
+        ),
+        (
+            "get_overnight_stays_data",
+            "_process_overnight_files_polars",
+            "fecha|zona_residencia|zona_pernoctacion|personas\n"
+            "{day}|A|B|2\n",
+        ),
+    ],
+)
+def test_processing_omission_cannot_make_a_valid_source_day_disappear(
+    monkeypatch, tmp_path, method_name, processor_name, source
+):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend="polars", end_date="2022-01-02"
+    )
+
+    def fake_download(_url, path):
+        day = "20220102" if "20220102" in path else "20220101"
+        _write_gzip(Path(path), source.format(day=day))
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    original = getattr(mobility, processor_name)
+
+    def omit_second_day(paths, *args, **kwargs):
+        return original(paths[:1], *args, **kwargs)
+
+    monkeypatch.setattr(mobility, processor_name, omit_second_day)
+    with pytest.warns(RuntimeWarning, match="processing omitted valid source dates"):
+        with pytest.raises(RuntimeError, match="invalid dates"):
+            getattr(mobility, method_name)(return_df=True)
+
+
+def test_processing_cannot_publish_dates_outside_requested_range(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
+
+    def fake_download(_url, path):
+        _write_gzip(
+            Path(path),
+            "fecha|zona_residencia|zona_pernoctacion|personas\n"
+            "20220101|A|B|2\n",
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    original = mobility._process_overnight_files_polars
+
+    def wrong_result(*args, **kwargs):
+        return original(*args, **kwargs).with_columns(
+            mobility_module.pl.lit("2022-01-03").alias("date")
+        )
+
+    monkeypatch.setattr(mobility, "_process_overnight_files_polars", wrong_result)
+    with pytest.raises(RuntimeError, match="outside the requested range"):
+        mobility.get_overnight_stays_data(return_df=True)
+
+
+def test_version_one_trip_count_sources_receive_the_same_daily_validation(
+    monkeypatch, tmp_path
+):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend="polars", version=1,
+        start_date="2020-03-11", end_date="2020-03-12",
+    )
+
+    def fake_download(_url, path):
+        day = "20200312" if "20200312" in path else "20200311"
+        extra = f"{day}|D|1|-2\n" if day == "20200312" else ""
+        _write_gzip(
+            Path(path),
+            "fecha|distrito|numero_viajes|personas\n"
+            f"{day}|D|1|2\n" + extra,
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    with pytest.warns(RuntimeWarning, match="source parsing failed"):
+        with pytest.raises(RuntimeError, match="invalid dates"):
+            mobility.get_number_of_trips_data(return_df=True)
+    with pytest.warns(RuntimeWarning, match="source parsing failed"):
+        partial = mobility.get_number_of_trips_data(
+            return_df=True, allow_partial=True
+        )
+    assert partial["date"].tolist() == ["2020-03-11"]
+    assert mobility.get_acquisition_manifest("maestra2")["parse_status"].tolist() == [
+        "valid", "failed"
+    ]
 
 
 @pytest.mark.parametrize("backend", ["pandas", "arrow", "polars"])
@@ -1581,6 +1750,58 @@ def test_network_mapping_validates_only_requested_source_ids():
         zones.get_network_mapping("source", "target")
     with pytest.raises(ValueError, match="not one-to-one"):
         zones.get_network_mapping("source", "target", source_ids=["C"])
+
+
+def test_zones_rejects_spaced_missing_identifier_markers():
+    zones = object.__new__(Zones)
+    zones.get_zone_relations = lambda: pd.DataFrame(
+        {"source": ["A", " NA "], "target": [" NA ", "X"]}
+    )
+    with pytest.raises(ValueError, match="without a target"):
+        zones.get_network_mapping("source", "target", source_ids=["A"])
+    with pytest.raises(ValueError, match="null or empty"):
+        Zones._canonicalize_geodataframe(
+            gpd.GeoDataFrame({"id": [" NA "]}, geometry=[Point(0, 0)])
+        )
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_optional_demographic_missing_markers_do_not_create_categories(
+    monkeypatch, tmp_path, backend
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
+    source = tmp_path / "od_optional.csv.gz"
+    _write_gzip(
+        source,
+        "fecha|periodo|origen|destino|actividad_origen|actividad_destino|renta|edad|sexo|viajes|viajes_km\n"
+        "20220101|0|A|B| NA |casa| NA | nA | None |2|4\n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(source)])
+
+    result = mobility.get_od_data(keep_activity=True, social_agg=True, return_df=True)
+    assert len(result) == 1
+    for column in ("activity_origin", "income", "age", "gender"):
+        assert pd.isna(result.iloc[0][column])
+    assert result.iloc[0]["activity_destination"] == "home"
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_trip_count_optional_demographic_markers_are_missing(
+    monkeypatch, tmp_path, backend
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
+    source = tmp_path / "trips_optional.csv.gz"
+    _write_gzip(
+        source,
+        "fecha|zona_pernoctacion|numero_viajes|personas|edad|sexo\n"
+        "20220101|A|1|2| NA | nA \n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(source)])
+
+    result = mobility.get_number_of_trips_data(return_df=True)
+    assert len(result) == 1
+    assert pd.isna(result.iloc[0]["age"])
+    assert pd.isna(result.iloc[0]["gender"])
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])

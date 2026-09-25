@@ -46,6 +46,18 @@ def test_version_assert_rejects_invalid_value():
         utils.version_assert(3)
 
 
+@pytest.mark.parametrize("invalid", [True, 1.0, "1"])
+def test_version_assert_rejects_values_that_only_compare_equal_to_an_int(invalid):
+    with pytest.raises(ValueError, match="version must be 1 or 2"):
+        utils.version_assert(invalid)
+
+
+@pytest.mark.parametrize("invalid", [None, "2024-02-30", "2024-13-01", "2024-1-01"])
+def test_date_format_assert_rejects_invalid_calendar_dates(invalid):
+    with pytest.raises(ValueError, match="date must"):
+        utils.date_format_assert(invalid)
+
+
 def test_zone_normalization_is_case_insensitive_for_aliases():
     assert utils.zone_normalization("MUNICIPAL") == "municipios"
 

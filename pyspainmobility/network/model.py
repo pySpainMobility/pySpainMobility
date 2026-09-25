@@ -122,7 +122,7 @@ def _append_provenance(
     return result
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class NodeIndex:
     """The scientific identity and order of a network's matrix nodes.
 
@@ -158,6 +158,20 @@ class NodeIndex:
                 raise ValueError("%s must be a non-empty string when provided." % name)
         node_ids = np.frombuffer(node_ids.tobytes(), dtype=node_ids.dtype)
         object.__setattr__(self, "node_ids", node_ids)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, NodeIndex):
+            return NotImplemented
+        return (
+            self.zoning_id == other.zoning_id
+            and self.zoning_version == other.zoning_version
+            and np.array_equal(self.node_ids, other.node_ids)
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (tuple(self.node_ids.tolist()), self.zoning_id, self.zoning_version)
+        )
 
     def positions(self) -> Dict[str, int]:
         """Map node ID to the corresponding matrix row/column position."""
@@ -423,7 +437,7 @@ class CommunityPartition:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SparseMobilityNetwork:
     """A weighted mobility network with an immutable node contract.
 
@@ -440,6 +454,7 @@ class SparseMobilityNetwork:
     node_index: Optional[NodeIndex] = None
     _number_of_edges: int = field(init=False, repr=False, compare=False)
     _total_weight: float = field(init=False, repr=False, compare=False)
+    __hash__ = None
 
     def __post_init__(self) -> None:
         matrix = csr_array(self.adjacency, dtype=np.float64, copy=True)
@@ -512,6 +527,19 @@ class SparseMobilityNetwork:
         object.__setattr__(self, "node_index", node_index)
         object.__setattr__(self, "_number_of_edges", logical_count)
         object.__setattr__(self, "_total_weight", logical_weight)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SparseMobilityNetwork):
+            return NotImplemented
+        return (
+            self.node_index == other.node_index
+            and self.metadata == other.metadata
+            and self.provenance == other.provenance
+            and self.adjacency.shape == other.adjacency.shape
+            and np.array_equal(self.adjacency.indptr, other.adjacency.indptr)
+            and np.array_equal(self.adjacency.indices, other.adjacency.indices)
+            and np.array_equal(self.adjacency.data, other.adjacency.data)
+        )
 
     def __reduce__(self):
         return (

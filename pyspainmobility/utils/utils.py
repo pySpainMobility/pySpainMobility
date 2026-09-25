@@ -8,6 +8,8 @@ import zipfile
 import gzip
 import json
 import tempfile
+from datetime import date as calendar_date
+from numbers import Integral
 from os.path import expanduser
 from urllib.request import urlopen, Request      
 
@@ -151,9 +153,13 @@ def zone_assert(zone: str = None, version: int = 2) -> None:
             raise Exception('gaus is not a valid zone for version 1. Please use version 2 or use a different zone')
 
 def version_assert(version: int = None) -> None:
-    if version not in [1, 2]:
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, Integral)
+        or version not in (1, 2)
+    ):
         raise ValueError(
-            "version must be 1 or 2. Verison 1 contains the data from 2020 to 2021. "
+            "version must be 1 or 2. Version 1 contains the data from 2020 to 2021. "
             "Version 2 contains the data from 2022 onwards."
         )
 
@@ -165,8 +171,12 @@ def mobility_assert(mobility_type: str = None) -> None:
         )
 
 def date_format_assert(date: str = None) -> None:
-    if not bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date)):
+    if not isinstance(date, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
         raise ValueError("date must be in the format YYYY-MM-DD")
+    try:
+        calendar_date.fromisoformat(date)
+    except ValueError as exc:
+        raise ValueError("date must be a valid calendar date in YYYY-MM-DD format") from exc
 
 def zone_normalization(zone: str = None) -> str:
     normalized_zone = str(zone).lower()

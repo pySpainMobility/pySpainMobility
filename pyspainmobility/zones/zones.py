@@ -221,7 +221,10 @@ class Zones:
         if identifiers.isna().any():
             raise ValueError("Zone geometry contains null or empty IDs.")
         identifiers = identifiers.astype(str).str.strip()
-        if identifiers.eq("").any():
+        missing_markers = identifiers.str.lower().isin(
+            {"na", "nan", "none", "null"}
+        )
+        if identifiers.eq("").any() or missing_markers.any():
             raise ValueError("Zone geometry contains null or empty IDs.")
         if identifiers.duplicated().any():
             examples = identifiers[identifiers.duplicated()].head(5).tolist()
@@ -379,6 +382,8 @@ class Zones:
         if pd.isna(value):
             return None
         identifier = str(value).strip()
+        if identifier.lower() in {"na", "nan", "none", "null"}:
+            return None
         return identifier or None
 
     def get_network_mapping(
