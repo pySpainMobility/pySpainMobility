@@ -20,6 +20,9 @@ All notable changes to this project are documented in this file.
   for subnormal positive weights.
 
 ### Changed
+- Require GeoPandas 1.1.4 or newer in its 1.1 series for the SQL injection fix
+  and subsequent `to_postgis` hardening. This raises the minimum supported
+  Python version to 3.10 and pandas version to 2.0.
 - Move automated tests into `tests/` and keep live tests opt-in.
 - Make Arrow and Dask optional pip extras and remove unused Matplotlib from
   runtime dependencies. Pandas input and output remain supported without Arrow.

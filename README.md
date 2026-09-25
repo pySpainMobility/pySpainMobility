@@ -27,10 +27,12 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
 <a id='installation'></a>
 ## Installation
-`pySpainMobility` supports Python >= 3.9 and can be installed with `pip` or `conda`.
+`pySpainMobility` can be installed with `pip` or `conda`. The next release
+will require Python >= 3.10. The published 2.0.0 package still uses the older
+GeoPandas requirement; the security update needs a new package release.
 
 <a id='installation_pip'></a>
-### installation with pip (python >= 3.9 required)
+### installation with pip (python >= 3.10 required for the next release)
 
 1. Create an environment `venv`
 
@@ -60,7 +62,7 @@ plotting code.
 
 1. Create an environment `mobility` and install pip
 
-        conda create -n mobility pip python=3.9
+        conda create -n mobility pip python=3.10
 
 2. Activate
 

@@ -20,10 +20,10 @@ setup(
     license="BSD 3-Clause License",
     package_dir={"": "."},
     packages=find_packages(include=["pyspainmobility", "pyspainmobility.*"]),
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
-        "geopandas~=1.0.1",
-        "pandas>=1.5",
+        "geopandas>=1.1.4,<1.2",
+        "pandas>=2.0",
         "tqdm>=4.0.0",
         "polars>=1.25,<2",
         "scipy>=1.11",
