@@ -29,6 +29,17 @@ except ImportError:
     dd = None
     delayed = None
 
+
+_ACTIVITY_TRANSLATIONS = {
+    "casa": "home",
+    "frecuente": "other_frequent",
+    "trabajo": "work_or_study",
+    "trabajo_estudio": "work_or_study",
+    "no_frecuente": "other_non_frequent",
+    "otros": "other",
+}
+
+
 class Mobility:
     """
     This is the object taking care of the data download and preprocessing of (i) daily origin-destination matrices (ii), overnight stays and (iii) number of trips.
@@ -545,15 +556,9 @@ class Mobility:
         ]
 
         if keep_activity:
-            activity_mapping = {
-                "casa": "home",
-                "frecuente": "other_frequent",
-                "trabajo_estudio": "work_or_study",
-                "no_frecuente": "other_non_frequent",
-            }
             for source in ("actividad_origen", "actividad_destino"):
                 expression = (
-                    self._polars_clean_string(source).replace(activity_mapping)
+                    self._polars_clean_string(source).replace(_ACTIVITY_TRANSLATIONS)
                     if source in source_columns
                     else pl.lit(None, dtype=pl.String)
                 )
@@ -759,18 +764,8 @@ class Mobility:
         #  map activity / gender labels
         df.replace(
             {
-                "activity_origin": {
-                    "casa": "home",
-                    "frecuente": "other_frequent",
-                    "trabajo_estudio": "work_or_study",
-                    "no_frecuente": "other_non_frequent",
-                },
-                "activity_destination": {
-                    "casa": "home",
-                    "frecuente": "other_frequent",
-                    "trabajo_estudio": "work_or_study",
-                    "no_frecuente": "other_non_frequent",
-                },
+                "activity_origin": _ACTIVITY_TRANSLATIONS,
+                "activity_destination": _ACTIVITY_TRANSLATIONS,
                 "gender": {"hombre": "male", "mujer": "female"},
             },
             inplace=True,
@@ -803,7 +798,8 @@ class Mobility:
         ----------
         keep_activity : bool
             Default value is False. If True, the columns 'activity_origin' and 'activity_destination' will be kept in the final dataframe. If False, the columns will be dropped.
-            The columns contain the activity of the origin and destination zones. The possible values are: 'home', 'work_or_study', 'other_frequent', 'other_non_frequent'.
+            The columns contain the activity of the origin and destination zones. Version 1 district values are 'home', 'work_or_study', and 'other'. Version 2 values are 'home', 'work_or_study', 'other_frequent', and 'other_non_frequent'.
+            For version 1, activity is available for districts only; municipality source files have no activity columns. Version 1 does not support social_agg.
             Consider that keeping the activity columns will increase the size of the final dataframe and the saved files significantly.
 
         return_df : bool
@@ -837,7 +833,11 @@ class Mobility:
 
         m_type = "Viajes" if self.version == 2 else "maestra1"
         if self.version == 1:
-            keep_activity = False
+            if keep_activity and self.zones == "municipios":
+                raise ValueError(
+                    "Version 1 municipality OD files do not contain activity columns. "
+                    "Use zones='districts' or keep_activity=False."
+                )
             social_agg = False
 
         local_list = self._donwload_helper(m_type)

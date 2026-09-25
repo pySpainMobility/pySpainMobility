@@ -632,6 +632,69 @@ def test_get_od_data_version1_translates_headers_and_schema(
     assert df.loc[0, "id_destination"] == "01009"
 
 
+@pytest.mark.parametrize("backend", ["pandas", "arrow", "polars", "dask_fallback"])
+def test_get_od_data_version1_keeps_and_translates_activity(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
+    if backend == "dask_fallback":
+        mobility = _build_mobility_dask(
+            monkeypatch, tmp_path, version=1, zones="districts"
+        )
+    else:
+        mobility = _build_mobility(
+            monkeypatch, tmp_path, backend=backend, version=1, zones="districts"
+        )
+
+    file_path = tmp_path / "od_v1_activity.txt.gz"
+    content = (
+        "fecha|origen|destino|actividad_origen|actividad_destino|residencia|edad|periodo|distancia|viajes|viajes_km\n"
+        "20200311|01001|01009|trabajo|otros|01|25-44|00|1|2|3\n"
+        "20200311|01001|01009|trabajo|otros|01|25-44|00|1|4|5\n"
+        "20200311|01001|01009|casa|otros|01|25-44|00|1|1|2\n"
+    )
+    _write_gzip(file_path, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+
+    df = mobility.get_od_data(keep_activity=True, social_agg=True, return_df=True)
+
+    assert list(df.columns) == [
+        "date",
+        "hour",
+        "id_origin",
+        "id_destination",
+        "activity_origin",
+        "activity_destination",
+        "n_trips",
+        "trips_total_length_km",
+    ]
+    rows = {
+        (row.activity_origin, row.activity_destination):
+        (row.n_trips, row.trips_total_length_km)
+        for row in df.itertuples(index=False)
+    }
+    assert rows == {
+        ("work_or_study", "other"): (6, 8),
+        ("home", "other"): (1, 2),
+    }
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_get_od_data_version1_rejects_unavailable_municipality_activity(
+    monkeypatch, tmp_path, backend
+):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend=backend, version=1, zones="municipalities"
+    )
+    monkeypatch.setattr(
+        mobility, "_donwload_helper", lambda *_: pytest.fail("download was attempted")
+    )
+
+    with pytest.raises(ValueError, match="municipality OD files do not contain activity"):
+        mobility.get_od_data(keep_activity=True, return_df=True)
+
+
 def test_get_od_data_keeps_activity_and_social_dimensions(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
 

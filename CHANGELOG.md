@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+- Version 1 district OD data can retain origin and destination activity with
+  `get_od_data(keep_activity=True)`, including the `trabajo` and `otros`
+  labels across all processing backends. Municipality files lack activity
+  columns, so requesting them now raises a clear error.
+
 ## [2.0.0] - 2026-09-22
 
 This major release introduces an auditable sparse-network analysis API and
