@@ -5,6 +5,9 @@ import xml.etree.ElementTree as ET
 import re
 from urllib.request import urlopen
 import zipfile
+import gzip
+import json
+import tempfile
 from os.path import expanduser
 from urllib.request import urlopen, Request      
 
@@ -230,43 +233,120 @@ def get_valid_dates(version: int = 2) -> list:
 
 
 
-def download_file_if_not_existing(url: str, local_path: str) -> None:
+def download_file_if_not_existing(
+    url: str, local_path: str, *, verify_cache: bool = False
+) -> None:
     """
-    Download *url* to *local_path* unless the file already exists **and**
-    is non-empty.  Zero-byte (or corrupted) files are deleted and fetched
-    again.
-    """
-    # If a previous run left an empty file, wipe it 
-    if os.path.exists(local_path) and os.path.getsize(local_path) == 0:
-        print(f"Found empty file at {local_path} – redownloading.")
-        os.remove(local_path)
+    Download *url* to *local_path* unless a valid cached file is present.
 
-    # Normal early-exit when the file is OK
-    if os.path.exists(local_path):
+    Gzip and ZIP archives are checked fully once, then an unchanged validated
+    file is recognized by a local stat marker. Pass ``verify_cache=True`` to
+    recheck an unchanged archive's contents. New downloads are staged and
+    atomically moved into place after validation.
+    """
+    archive = local_path.endswith((".gz", ".zip"))
+    marker_path = os.path.join(
+        os.path.dirname(local_path),
+        ".%s.pyspainmobility-validated.json" % os.path.basename(local_path),
+    )
+
+    def signature(path: str) -> dict:
+        stat = os.stat(path)
+        return {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "inode": stat.st_ino,
+            "device": stat.st_dev,
+        }
+
+    def has_matching_marker(path: str) -> bool:
+        try:
+            with open(marker_path, encoding="utf-8") as stream:
+                marker = json.load(stream)
+            return marker == signature(path)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def mark_validated(path: str) -> None:
+        if not archive:
+            return
+        marker_temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=os.path.dirname(path) or ".",
+                prefix=".pyspainmobility-", suffix=".json", delete=False,
+            ) as stream:
+                marker_temporary_path = stream.name
+                json.dump(signature(path), stream)
+            os.replace(marker_temporary_path, marker_path)
+        except OSError:
+            # The marker is only a performance hint. A later call will run
+            # full archive validation if it cannot be saved.
+            if marker_temporary_path is not None and os.path.exists(marker_temporary_path):
+                os.remove(marker_temporary_path)
+
+    def valid_cached_file(path: str, *, trust_marker: bool = False) -> bool:
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return False
+        if archive and trust_marker and has_matching_marker(path):
+            return True
+        try:
+            if path.endswith(".gz"):
+                with gzip.open(path, "rb") as stream:
+                    while stream.read(1024 * 1024):
+                        pass
+            elif path.endswith(".zip"):
+                with zipfile.ZipFile(path) as zip_archive:
+                    if zip_archive.testzip() is not None:
+                        return False
+        except (OSError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            return False
+        return True
+
+    if valid_cached_file(local_path, trust_marker=not verify_cache):
+        if archive and not has_matching_marker(local_path):
+            mark_validated(local_path)
         return
 
     target_dir = os.path.dirname(local_path)
     if target_dir:
         os.makedirs(target_dir, exist_ok=True)
 
+    temporary_path = None
     try:
         print(f"Downloading: {url}")
         req = Request(url, headers={"User-Agent": "Mozilla/5.0"})   # header
         with urlopen(req) as resp:
             if resp.status != 200:
                 raise Exception(f"HTTP {resp.status}")
-            data = resp.read()
-            if not data:
-                raise Exception("Downloaded file is empty")
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=target_dir or ".", prefix=".pyspainmobility-",
+                suffix=os.path.splitext(local_path)[1],
+                delete=False,
+            ) as fh:
+                temporary_path = fh.name
+                size = 0
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    size += len(chunk)
+            if size == 0:
+                raise ValueError("Downloaded file is empty")
+            content_length = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+            if content_length is not None and size != int(content_length):
+                raise ValueError("Downloaded file size does not match Content-Length")
+        if not valid_cached_file(temporary_path):
+            raise ValueError("Downloaded file failed integrity validation")
+        os.replace(temporary_path, local_path)
+        temporary_path = None
+        mark_validated(local_path)
+        print(f"Saved {size} bytes to {local_path}")
 
-        with open(local_path, "wb") as fh:
-            fh.write(data)
-        print(f"Saved {len(data)} bytes to {local_path}")
-
-    except Exception as e:
-        # Clean up partial artefacts
-        if os.path.exists(local_path):
-            os.remove(local_path)
+    except Exception:
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.remove(temporary_path)
         raise
 
 def get_dates_between(start_date: str, end_date: str) -> list:

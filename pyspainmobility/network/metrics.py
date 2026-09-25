@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import polars as pl
-from scipy.sparse import diags, triu
+from scipy.sparse import triu
 
 from .model import NodeIndex, SparseMobilityNetwork
 
@@ -106,18 +106,22 @@ def _row_scales(matrix) -> np.ndarray:
     return scales
 
 
+def _normalize_rows(matrix, scales: np.ndarray):
+    """Divide stored values directly, avoiding overflow in 1 / tiny scale."""
+    result = matrix.copy()
+    if result.nnz:
+        result.data /= np.repeat(scales, np.diff(result.indptr))
+    return result
+
+
 def _stable_row_cosine(left_matrix, right_matrix) -> np.ndarray:
     """Cosine per CSR row, stable for both very large and tiny weights."""
     left_scales = _row_scales(left_matrix)
     right_scales = _row_scales(right_matrix)
     left_active = left_scales > 0
     right_active = right_scales > 0
-    left_normalized = diags(
-        np.divide(1.0, left_scales, out=np.ones_like(left_scales), where=left_active)
-    ) @ left_matrix
-    right_normalized = diags(
-        np.divide(1.0, right_scales, out=np.ones_like(right_scales), where=right_active)
-    ) @ right_matrix
+    left_normalized = _normalize_rows(left_matrix, left_scales)
+    right_normalized = _normalize_rows(right_matrix, right_scales)
     dot = np.asarray(left_normalized.multiply(right_normalized).sum(axis=1)).ravel()
     left_norm = np.sqrt(
         np.asarray(left_normalized.multiply(left_normalized).sum(axis=1)).ravel()

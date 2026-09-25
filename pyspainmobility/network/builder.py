@@ -13,10 +13,24 @@ from .model import (
     NetworkMetadata,
     NetworkSpec,
     SparseMobilityNetwork,
+    _missing_node_id,
 )
 
 
 ODSource = Union[str, Path, pd.DataFrame, pl.DataFrame, pl.LazyFrame]
+
+
+def _pandas_to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+    """Convert pandas input with a slower fallback when Arrow is optional."""
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        columns = {
+            str(name): frame[name].astype(object).where(frame[name].notna(), None).tolist()
+            for name in frame.columns
+        }
+        return pl.DataFrame(columns)
+    return pl.from_pandas(frame, include_index=False)
 
 
 def _as_lazy_frame(data: ODSource) -> pl.LazyFrame:
@@ -26,7 +40,7 @@ def _as_lazy_frame(data: ODSource) -> pl.LazyFrame:
     if isinstance(data, pl.DataFrame):
         return data.lazy()
     if isinstance(data, pd.DataFrame):
-        return pl.from_pandas(data, include_index=False).lazy()
+        return _pandas_to_polars(data).lazy()
     if isinstance(data, (str, Path)):
         path = Path(data)
         if path.is_dir():
@@ -52,16 +66,29 @@ def _as_lazy_frame(data: ODSource) -> pl.LazyFrame:
 def _normalized_node_ids(node_ids: Sequence[object]) -> np.ndarray:
     if isinstance(node_ids, (str, bytes)):
         raise ValueError("node_ids must be a sequence of node IDs, not one string.")
-    if any(value is None for value in node_ids):
-        raise ValueError("node_ids must not contain null IDs.")
-    values = np.asarray([str(value).strip() for value in node_ids], dtype=str)
-    if values.ndim != 1:
+    source_ids = np.asarray(list(node_ids), dtype=object)
+    if source_ids.ndim != 1:
         raise ValueError("node_ids must be a one-dimensional sequence.")
+    if any(_missing_node_id(value) for value in source_ids):
+        raise ValueError("node_ids must not contain null IDs.")
+    values = np.asarray([str(value).strip() for value in source_ids], dtype=str)
     if len(np.unique(values)) != len(values):
         raise ValueError("node_ids must be unique.")
     if any(not value for value in values):
         raise ValueError("node_ids must not contain empty IDs.")
     return values
+
+
+def _string_identifier_expression(column: str, dtype: object) -> pl.Expr:
+    """Normalize an ID while preserving numeric NaN as a missing value."""
+    value = pl.col(column)
+    if dtype in {pl.Float32, pl.Float64}:
+        return (
+            pl.when(value.is_finite())
+            .then(value.cast(pl.String).str.strip_chars())
+            .otherwise(None)
+        )
+    return value.cast(pl.String).str.strip_chars()
 
 
 def _selected_od_rows(
@@ -70,18 +97,16 @@ def _selected_od_rows(
     extra_expressions: Sequence[pl.Expr] = (),
 ) -> pl.LazyFrame:
     """Select canonical OD columns after checking the source schema."""
-    available = set(lazy_frame.collect_schema().names())
+    schema = lazy_frame.collect_schema()
+    available = set(schema.names())
     required = {spec.origin, spec.destination, spec.weight}
     missing = sorted(required - available)
     if missing:
         raise ValueError("OD input is missing required columns: %s" % missing)
     return lazy_frame.select(
         [
-            pl.col(spec.origin).cast(pl.String).str.strip_chars().alias("_origin"),
-            pl.col(spec.destination)
-            .cast(pl.String)
-            .str.strip_chars()
-            .alias("_destination"),
+            _string_identifier_expression(spec.origin, schema[spec.origin]).alias("_origin"),
+            _string_identifier_expression(spec.destination, schema[spec.destination]).alias("_destination"),
             pl.col(spec.weight).cast(pl.Float64, strict=False).alias("_weight"),
             *extra_expressions,
         ]

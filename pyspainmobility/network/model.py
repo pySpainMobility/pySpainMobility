@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import pandas as pd
 import polars as pl
 from scipy.sparse import csr_array, triu
 
@@ -93,6 +94,16 @@ def _audit_value(value: object) -> object:
     return value
 
 
+def _missing_node_id(value: object) -> bool:
+    """Recognize scalar missing IDs before they are converted to strings."""
+    try:
+        if bool(pd.isna(value)):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(value, (float, np.floating)) and not np.isfinite(value)
+
+
 def _append_provenance(
     previous: Optional[Mapping[str, object]], kind: str, details: Mapping[str, object]
 ) -> Dict[str, object]:
@@ -127,13 +138,14 @@ class NodeIndex:
     def __post_init__(self) -> None:
         if isinstance(self.node_ids, (str, bytes)):
             raise ValueError("node_ids must be a sequence of node IDs, not one string.")
-        if any(node_id is None for node_id in self.node_ids):
+        source_ids = np.asarray(list(self.node_ids), dtype=object)
+        if source_ids.ndim != 1:
+            raise ValueError("node_ids must be one-dimensional.")
+        if any(_missing_node_id(node_id) for node_id in source_ids):
             raise ValueError("node_ids must not contain null IDs.")
         node_ids = np.asarray(
-            [str(node_id).strip() for node_id in self.node_ids], dtype=str
+            [str(node_id).strip() for node_id in source_ids], dtype=str
         )
-        if node_ids.ndim != 1:
-            raise ValueError("node_ids must be one-dimensional.")
         if len(np.unique(node_ids)) != len(node_ids):
             raise ValueError("node_ids must be unique.")
         if any(not node_id for node_id in node_ids):
@@ -438,6 +450,8 @@ class SparseMobilityNetwork:
         if self.provenance is not None and not isinstance(self.provenance, Mapping):
             raise TypeError("provenance must be a mapping when provided.")
 
+        if any(_missing_node_id(node_id) for node_id in self.node_ids):
+            raise ValueError("node_ids must not contain null IDs.")
         node_ids = np.asarray(self.node_ids, dtype=str).copy()
         if node_ids.ndim != 1 or len(node_ids) != matrix.shape[0]:
             raise ValueError(

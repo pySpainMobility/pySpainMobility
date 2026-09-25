@@ -14,6 +14,7 @@ from .builder import (
     _as_lazy_frame,
     _invalid_od_condition,
     _normalized_node_ids,
+    _pandas_to_polars,
     _selected_od_rows,
     build_network,
 )
@@ -86,6 +87,8 @@ def _calendar_date_expression(column: str, dtype: object) -> pl.Expr:
             raw.str.strptime(
                 pl.Datetime(), "%Y-%m-%d %H:%M:%S%.f", strict=False
             ),
+            raw.str.strptime(pl.Datetime(), "%Y-%m-%dT%H:%M", strict=False),
+            raw.str.strptime(pl.Datetime(), "%Y-%m-%d %H:%M", strict=False),
         ]
     )
     offset_timestamp = pl.coalesce(
@@ -99,6 +102,12 @@ def _calendar_date_expression(column: str, dtype: object) -> pl.Expr:
                 pl.Datetime(time_zone="UTC"),
                 "%Y-%m-%d %H:%M:%S%.f%#z",
                 strict=False,
+            ),
+            raw.str.strptime(
+                pl.Datetime(time_zone="UTC"), "%Y-%m-%dT%H:%M%#z", strict=False
+            ),
+            raw.str.strptime(
+                pl.Datetime(time_zone="UTC"), "%Y-%m-%d %H:%M%#z", strict=False
             ),
         ]
     )
@@ -143,7 +152,7 @@ def _manifest_dates(
 ) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
     """Validate a file-acquisition manifest and return all/observed dates."""
     if isinstance(manifest, pd.DataFrame):
-        frame = pl.from_pandas(manifest, include_index=False)
+        frame = _pandas_to_polars(manifest)
     elif isinstance(manifest, pl.DataFrame):
         frame = manifest
     else:
@@ -241,6 +250,7 @@ class TemporalCoverage:
     source_manifest_provided: bool
     excluded_data_dates: Tuple[str, ...] = ()
     excluded_data_weight: float = 0.0
+    excluded_invalid_row_count: int = 0
 
     def __post_init__(self) -> None:
         requested = _date_labels(self.requested_dates, "requested_dates")
@@ -261,6 +271,12 @@ class TemporalCoverage:
             )
         if not np.isfinite(self.excluded_data_weight) or self.excluded_data_weight < 0:
             raise ValueError("excluded_data_weight must be finite and non-negative.")
+        if (
+            isinstance(self.excluded_invalid_row_count, bool)
+            or not isinstance(self.excluded_invalid_row_count, int)
+            or self.excluded_invalid_row_count < 0
+        ):
+            raise ValueError("excluded_invalid_row_count must be a non-negative integer.")
         object.__setattr__(self, "requested_dates", requested)
         object.__setattr__(self, "source_dates", source)
         object.__setattr__(self, "data_dates", data)
@@ -298,6 +314,7 @@ class TemporalCoverage:
             "unresolved_requested_dates": list(self.unresolved_requested_dates),
             "excluded_failed_data_dates": list(self.excluded_data_dates),
             "excluded_failed_data_weight": self.excluded_data_weight,
+            "excluded_failed_invalid_row_count": self.excluded_invalid_row_count,
         }
 
 
@@ -674,6 +691,59 @@ def build_temporal_network(
             | canonical_date.is_null()
         )
 
+    source_dates = (
+        observed
+        if observed_dates is not None or acquisition_manifest is not None
+        else ()
+    )
+    excluded_data_dates = ()
+    excluded_data_weight = 0.0
+    excluded_invalid_row_count = 0
+    if failed_data_policy == "exclude" and (
+        observed_dates is not None or acquisition_manifest is not None
+    ):
+        canonical_date = _calendar_date_expression(time_column, schema[time_column])
+        selected_for_exclusion = _selected_od_rows(
+            scoped_source,
+            spec,
+            [canonical_date.alias("_date")],
+        )
+        excluded_rows = selected_for_exclusion.filter(
+            pl.col("_date").is_not_null() & ~pl.col("_date").is_in(source_dates)
+        )
+        excluded_dates_frame, excluded_stats = pl.collect_all(
+            [
+                excluded_rows.select("_date").unique().sort("_date"),
+                excluded_rows.select(
+                    pl.when(
+                        pl.col("_weight").is_finite()
+                        & (pl.col("_weight") >= 0)
+                    )
+                    .then(pl.col("_weight"))
+                    .otherwise(0.0)
+                    .sum()
+                    .alias("weight"),
+                    _invalid_od_condition().sum().alias("invalid_rows"),
+                ),
+            ]
+        )
+        excluded_data_dates = tuple(excluded_dates_frame.get_column("_date").to_list())
+        outside_requested = sorted(set(excluded_data_dates) - set(requested))
+        if outside_requested:
+            raise ValueError(
+                "OD input contains dates outside requested_dates: %s"
+                % outside_requested[:5]
+            )
+        excluded_data_weight = float(excluded_stats.item(0, "weight") or 0.0)
+        excluded_invalid_row_count = int(
+            excluded_stats.item(0, "invalid_rows") or 0
+        )
+        # Keep invalid date labels in scope so they still fail validation.
+        scoped_source = scoped_source.filter(
+            _date_filter_expression(time_column, source_dates, schema[time_column])
+            | canonical_date.is_null()
+        )
+
     def inspect_source(frame: pl.LazyFrame):
         selected = _selected_od_rows(
             frame,
@@ -686,9 +756,6 @@ def build_temporal_network(
         valid = selected.filter(~invalid_condition)
         invalid_query = selected.filter(invalid_condition).select(pl.len().alias("count"))
         dates_query = valid.select("_date").unique().sort("_date")
-        weights_query = valid.group_by("_date").agg(
-            pl.col("_weight").sum().alias("_weight")
-        )
         nodes_query = (
             pl.concat(
                 [
@@ -699,8 +766,8 @@ def build_temporal_network(
             .unique()
             .sort("_node")
         )
-        invalid, dates, nodes, weights = pl.collect_all(
-            [invalid_query, dates_query, nodes_query, weights_query]
+        invalid, dates, nodes = pl.collect_all(
+            [invalid_query, dates_query, nodes_query]
         )
         invalid_count = int(invalid.item(0, "count"))
         if invalid_count:
@@ -711,36 +778,21 @@ def build_temporal_network(
         return (
             tuple(dates.get_column("_date").to_list()),
             nodes,
-            dict(zip(weights.get_column("_date").to_list(), weights.get_column("_weight").to_list())),
         )
 
-    data_dates, nodes_frame, date_weights = inspect_source(scoped_source)
+    data_dates, nodes_frame = inspect_source(scoped_source)
     if not requested:
         requested = data_dates
-    source_dates = (
-        observed
-        if observed_dates is not None or acquisition_manifest is not None
-        else data_dates
-    )
+    if observed_dates is None and acquisition_manifest is None:
+        source_dates = data_dates
     failed_dates_with_data = tuple(sorted(set(data_dates) - set(source_dates)))
-    excluded_data_weight = 0.0
     if failed_dates_with_data:
-        if failed_data_policy == "error":
-            raise ValueError(
-                "OD input contains rows for dates not observed by the source "
-                "manifest: %s. This usually indicates a partially failed "
-                "source day; remove it upstream or pass failed_data_policy='exclude'."
-                % list(failed_dates_with_data[:5])
-            )
-        scoped_source = scoped_source.filter(
-            ~_date_filter_expression(
-                time_column, failed_dates_with_data, schema[time_column]
-            )
+        raise ValueError(
+            "OD input contains rows for dates not observed by the source "
+            "manifest: %s. This usually indicates a partially failed "
+            "source day; remove it upstream or pass failed_data_policy='exclude'."
+            % list(failed_dates_with_data[:5])
         )
-        excluded_data_weight = float(
-            sum(date_weights[label] for label in failed_dates_with_data)
-        )
-        data_dates, nodes_frame, _ = inspect_source(scoped_source)
     coverage = TemporalCoverage(
         requested_dates=requested,
         source_dates=source_dates,
@@ -749,9 +801,10 @@ def build_temporal_network(
             observed_dates is not None or acquisition_manifest is not None
         ),
         excluded_data_dates=(
-            failed_dates_with_data if failed_data_policy == "exclude" else ()
+            excluded_data_dates if failed_data_policy == "exclude" else ()
         ),
         excluded_data_weight=excluded_data_weight,
+        excluded_invalid_row_count=excluded_invalid_row_count,
     )
 
     if node_ids is None:

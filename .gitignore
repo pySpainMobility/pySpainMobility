@@ -17,9 +17,6 @@ __pycache__/
 *.so
 
 
-# local test notebooks / scratch tests
-tests/
-
 # Distribution / packaging
 .Python
 build/
@@ -199,6 +196,9 @@ experiments_data/
 # Downloaded MITMA data and locally derived geometry caches.
 /data/
 
+# Local integrity markers for downloaded compressed files.
+.*.pyspainmobility-validated.json
+
 # Generated visual artefacts. Keep the portable scripts that reproduce them.
 /examples/*.png
 /examples/*.pdf
@@ -206,3 +206,7 @@ experiments_data/
 
 # Paper-specific figure script; it depends on the ignored local analysis data.
 /scripts/generate_paper_network_figure.py
+
+# Local manuscript and paper-only figure draft.
+/examples/section_network_pyspainmobility.tex
+/scripts/generate_figure_1_architecture.py

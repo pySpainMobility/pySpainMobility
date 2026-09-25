@@ -9,10 +9,11 @@ Panels:
 """
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Matplotlib cache setup to avoid permission warnings
-mpl_cache = Path("/tmp/mpl_pyspainmobility")
+mpl_cache = Path(tempfile.gettempdir()) / "mpl_pyspainmobility"
 mpl_cache.mkdir(parents=True, exist_ok=True)
 os.environ["MPLCONFIGDIR"] = str(mpl_cache)
 
@@ -520,12 +521,6 @@ def main():
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     fig.savefig(output_pdf, bbox_inches="tight")
     plt.close(fig)
-
-    # Copy to artifact directory for embedding in agent markdown
-    import shutil
-    artifact_dir = Path("/Users/ciro/.gemini/antigravity/brain/599607b3-e383-4375-ae5c-0e409a984f29")
-    if artifact_dir.exists():
-        shutil.copyfile(output_png, artifact_dir / "figure_network_pipeline.png")
 
     print(f"Successfully generated:\n  - {output_png} (300 DPI)\n  - {output_pdf} (Vector PDF)")
 

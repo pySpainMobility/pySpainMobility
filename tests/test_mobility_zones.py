@@ -1226,3 +1226,208 @@ def test_province_mapping_integrates_with_network_and_drops_internalized_flows(
         {"id_origin": "28", "id_destination": "08", "weight": 7.0}
     ]
     assert province_network.audit()["provenance"]["spatial"]["dropped_target_self_loop_weight"] == pytest.approx(4.0)
+
+
+def test_polars_daily_scans_align_reordered_measure_columns_and_manifest(tmp_path):
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    first.write_text(
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20240101|0|A|B|1|2\n"
+    )
+    second.write_text(
+        "fecha|periodo|origen|destino|viajes_km|viajes\n"
+        "20240102|0|A|B|400|3\n"
+    )
+    mobility = object.__new__(Mobility)
+    mobility.backend = "polars"
+    result = mobility._process_od_files_polars(
+        [str(first), str(second)], False, False
+    )
+    assert result["n_trips"].tolist() == [1.0, 3.0]
+    assert result["trips_total_length_km"].tolist() == [2.0, 400.0]
+
+    mobility._acquisition_manifests = {}
+    mobility._set_acquisition_manifest(
+        "Viajes",
+        [
+            [day, "Viajes", "available", "unverified", str(path), None]
+            for day, path in [("2024-01-01", first), ("2024-01-02", second)]
+        ],
+    )
+    mobility._finalize_od_manifest(
+        "Viajes", [str(first), str(second)], processed_success=True
+    )
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "valid", "valid"
+    ]
+
+
+def test_polars_daily_scans_align_overnight_and_trip_count_columns(tmp_path):
+    mobility = object.__new__(Mobility)
+    mobility.backend = "polars"
+    mobility.version = 2
+    overnight_a = tmp_path / "overnight_a.csv"
+    overnight_b = tmp_path / "overnight_b.csv"
+    overnight_a.write_text(
+        "fecha|zona_residencia|zona_pernoctacion|personas\n"
+        "20240101|A|B|2\n"
+    )
+    overnight_b.write_text(
+        "fecha|personas|zona_residencia|zona_pernoctacion\n"
+        "20240102|7|C|D\n"
+    )
+    overnight = mobility._process_overnight_files_polars(
+        [str(overnight_a), str(overnight_b)]
+    )
+    assert overnight["people"].tolist() == [2.0, 7.0]
+    assert overnight["residence_area"].tolist() == ["A", "C"]
+
+    trips_a = tmp_path / "trips_a.csv"
+    trips_b = tmp_path / "trips_b.csv"
+    trips_a.write_text(
+        "fecha|zona_pernoctacion|numero_viajes|personas\n"
+        "20240101|A|1|2\n"
+    )
+    trips_b.write_text(
+        "fecha|personas|numero_viajes|zona_pernoctacion\n"
+        "20240102|9|2|B\n"
+    )
+    trips = mobility._process_number_of_trips_files_polars(
+        [str(trips_a), str(trips_b)]
+    )
+    assert trips["people"].tolist() == [2.0, 9.0]
+    assert trips["overnight_stay_area"].tolist() == ["A", "B"]
+
+
+def test_polars_missing_id_marker_is_not_a_zone_or_a_valid_source_day(tmp_path):
+    source = tmp_path / "missing_id.csv"
+    source.write_text(
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20240101|0| NA |B|1|2\n"
+    )
+    mobility = object.__new__(Mobility)
+    mobility.backend = "polars"
+    assert mobility._process_od_files_polars([str(source)], False, False) is None
+    mobility._acquisition_manifests = {}
+    mobility._set_acquisition_manifest(
+        "Viajes",
+        [["2024-01-01", "Viajes", "available", "unverified", str(source), None]],
+    )
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        mobility._finalize_od_manifest("Viajes", [str(source)], processed_success=False)
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "failed"
+    ]
+
+
+def test_polars_bad_daily_file_keeps_valid_day_and_marks_only_bad_day_failed(tmp_path):
+    good = tmp_path / "good.csv"
+    bad = tmp_path / "bad.csv"
+    header = "fecha|periodo|origen|destino|viajes|viajes_km\n"
+    good.write_text(header + "20240101|0|A|B|1|2\n")
+    bad.write_text(header + "20240102|0|A|B|3|4|extra\n")
+    mobility = object.__new__(Mobility)
+    mobility.backend = "polars"
+    result = mobility._process_od_files_polars([str(good), str(bad)], False, False)
+    assert result["n_trips"].tolist() == [1.0]
+    mobility._acquisition_manifests = {}
+    mobility._set_acquisition_manifest(
+        "Viajes",
+        [
+            [day, "Viajes", "available", "unverified", str(path), None]
+            for day, path in [("2024-01-01", good), ("2024-01-02", bad)]
+        ],
+    )
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        mobility._finalize_od_manifest(
+            "Viajes", [str(good), str(bad)], processed_success=True
+        )
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "valid", "failed"
+    ]
+
+
+def test_zones_rechecks_an_existing_empty_source_file(monkeypatch, tmp_path):
+    source = tmp_path / "relacion_ine_zonificacionMitma.csv"
+    source.write_bytes(b"")
+    monkeypatch.setattr(
+        utils,
+        "available_zoning_data",
+        lambda *_: pd.DataFrame({"link": ["https://example.org/" + source.name]}),
+    )
+    calls = []
+
+    def refresh(_url, path):
+        calls.append(path)
+        Path(path).write_bytes(b"restored")
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", refresh)
+    zones = Zones(zones="municipalities", version=2, output_directory=str(tmp_path))
+    zones._ensure_zoning_files_downloaded()
+    assert calls == [str(source)]
+    assert source.read_bytes() == b"restored"
+
+
+def test_network_mapping_validates_only_requested_source_ids():
+    zones = object.__new__(Zones)
+    zones.get_zone_relations = lambda: pd.DataFrame(
+        {
+            "source": ["A", "B", "C", "C"],
+            "target": ["X", None, "Y", "Z"],
+        }
+    )
+    assert zones.get_network_mapping(
+        "source", "target", source_ids=["A"]
+    ).to_dict("records") == [{"source_id": "A", "target_id": "X"}]
+    with pytest.raises(ValueError, match="without a target"):
+        zones.get_network_mapping("source", "target")
+    with pytest.raises(ValueError, match="not one-to-one"):
+        zones.get_network_mapping("source", "target", source_ids=["C"])
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+@pytest.mark.parametrize(
+    "invalid_row",
+    [
+        "20240230|12|A|B|3|4",
+        "20240229|bad|A|B|3|4",
+        "20240229|24|A|B|3|4",
+    ],
+)
+def test_od_drops_invalid_calendar_dates_and_hours_and_fails_manifest(
+    tmp_path, backend, invalid_row
+):
+    source = tmp_path / "od.csv"
+    source.write_text(
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20240229|12|A|B|2|5\n"
+        + invalid_row + "\n"
+    )
+    mobility = object.__new__(Mobility)
+    mobility.backend = backend
+    if backend == "polars":
+        frame = mobility._process_od_files_polars(
+            [str(source)], False, False, as_pandas=False
+        )
+        rows = frame.to_dicts()
+    else:
+        frame = mobility._process_single_od_file(str(source), False, False)
+        rows = frame.to_dict("records")
+    assert len(rows) == 1
+    assert rows[0]["date"] == "2024-02-29"
+    assert rows[0]["hour"] == 12
+    assert rows[0]["n_trips"] == 2.0
+
+    mobility._acquisition_manifests = {}
+    mobility._set_acquisition_manifest(
+        "Viajes",
+        [["2024-02-29", "Viajes", "available", "unverified", str(source), None]],
+    )
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        mobility._finalize_od_manifest(
+            "Viajes", [str(source)], processed_success=True
+        )
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "failed"
+    ]

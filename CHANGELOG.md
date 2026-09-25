@@ -10,6 +10,22 @@ All notable changes to this project are documented in this file.
   labels across all processing backends. Municipality files lack activity
   columns, so requesting them now raises a clear error.
 
+### Fixed
+- Validate OD calendar dates and hourly periods before including rows; flag
+  invalid source days in acquisition manifests on both pandas and Polars paths.
+- Apply failed-day exclusion before validating OD rows and report excluded
+  rows whose weights or endpoints are invalid.
+- Validate only requested zone relations when a source-ID subset is supplied.
+- Reject nested node IDs and avoid overflow in per-origin cosine similarity
+  for subnormal positive weights.
+
+### Changed
+- Move automated tests into `tests/` and keep live tests opt-in.
+- Make Arrow and Dask optional pip extras and remove unused Matplotlib from
+  runtime dependencies. Pandas input and output remain supported without Arrow.
+- Reuse an unchanged, previously validated compressed download without
+  decompressing it again on every cache hit.
+
 ## [2.0.0] - 2026-09-22
 
 This major release introduces an auditable sparse-network analysis API and

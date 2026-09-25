@@ -1,4 +1,6 @@
 import io
+import gzip
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -17,7 +19,7 @@ class _BytesContext(io.BytesIO):
 
 class _HTTPBytesResponse:
     def __init__(self, payload: bytes, status: int = 200):
-        self.payload = payload
+        self.payload = io.BytesIO(payload)
         self.status = status
 
     def __enter__(self):
@@ -26,8 +28,8 @@ class _HTTPBytesResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        return self.payload.read(size)
 
 
 def test_zone_assert_accepts_documented_municipal_alias():
@@ -317,3 +319,78 @@ def test_download_file_if_not_existing_supports_filename_only_path(monkeypatch, 
 
     utils.download_file_if_not_existing("https://example.org/standalone.bin", "standalone.bin")
     assert output_file.read_bytes() == payload
+
+
+def test_download_replaces_corrupt_cached_gzip(monkeypatch, tmp_path):
+    output_file = tmp_path / "daily.csv.gz"
+    output_file.write_bytes(b"incomplete gzip payload")
+    payload = gzip.compress(b"fecha|viajes\n20240101|3\n")
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload))
+
+    utils.download_file_if_not_existing(
+        "https://example.org/daily.csv.gz", str(output_file)
+    )
+
+    assert gzip.decompress(output_file.read_bytes()) == b"fecha|viajes\n20240101|3\n"
+
+
+def test_validated_gzip_cache_skips_repeat_decompression_and_checks_changes(
+    monkeypatch, tmp_path
+):
+    output_file = tmp_path / "daily.csv.gz"
+    payload = gzip.compress(b"fecha|viajes\n20240101|3\n")
+    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload))
+    url = "https://example.org/daily.csv.gz"
+    utils.download_file_if_not_existing(url, str(output_file))
+
+    original_open = utils.gzip.open
+    calls = []
+
+    def counting_open(*args, **kwargs):
+        calls.append(args[0])
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(utils.gzip, "open", counting_open)
+    utils.download_file_if_not_existing(url, str(output_file))
+    assert calls == []
+
+    output_file.write_bytes(b"corrupt cache")
+    utils.download_file_if_not_existing(url, str(output_file))
+    assert calls
+    assert gzip.decompress(output_file.read_bytes()) == b"fecha|viajes\n20240101|3\n"
+
+    original_stat = output_file.stat()
+    output_file.write_bytes(b"x" * len(payload))
+    os.utime(
+        output_file,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    utils.download_file_if_not_existing(url, str(output_file), verify_cache=True)
+    assert gzip.decompress(output_file.read_bytes()) == b"fecha|viajes\n20240101|3\n"
+
+
+def test_download_interruption_keeps_final_path_and_removes_temporary_file(
+    monkeypatch, tmp_path
+):
+    output_file = tmp_path / "daily.csv.gz"
+    output_file.write_bytes(b"old corrupt cache")
+
+    class InterruptedResponse(_HTTPBytesResponse):
+        def __init__(self):
+            super().__init__(b"partial")
+            self.calls = 0
+
+        def read(self, size=-1):
+            self.calls += 1
+            if self.calls == 2:
+                raise OSError("connection interrupted")
+            return super().read(size)
+
+    monkeypatch.setattr(utils, "urlopen", lambda *_: InterruptedResponse())
+    with pytest.raises(OSError, match="connection interrupted"):
+        utils.download_file_if_not_existing(
+            "https://example.org/daily.csv.gz", str(output_file)
+        )
+
+    assert output_file.read_bytes() == b"old corrupt cache"
+    assert list(tmp_path.glob(".pyspainmobility-*")) == []

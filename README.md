@@ -22,8 +22,6 @@ Bibtex:
 }
 ```
 
-## Table of Content
-
 ## Documentation
 The documentation of `pySpainMobility` classes and functions is available at [pyspainmobility.github.io/pySpainMobility](https://pyspainmobility.github.io/pySpainMobility)
 
@@ -46,6 +44,17 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
         pip install pyspainmobility
 
+The base installation includes the Polars backend and the `Zones` class.
+Optional Arrow and Dask backends can be installed when needed:
+
+        pip install 'pyspainmobility[arrow]'
+        pip install 'pyspainmobility[dask]'
+
+These extras add sizeable dependencies; they are not needed for the default
+Polars processing path. Install the `arrow` extra if you plan to read the
+generated Parquet files with pandas. `matplotlib` is only needed for your own
+plotting code.
+
 <a id='installation_conda'></a>
 ### installation with conda - miniconda
 
@@ -66,13 +75,21 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
 Examples can be found in the repository named [Examples](https://github.com/pySpainMobility/examples)
 
-## What's New in 1.1.0
+## Repository layout
 
-- Added `backend` selection in `Mobility` (`backend="arrow"` by default, `backend="pandas"` supported).
-- Added automatic fallback from Arrow to pandas with a warning when `pyarrow` is unavailable.
-- Improved data preprocessing robustness and column normalization/translation.
-- Improved loading behavior when using custom `output_directory` paths.
-- Aligned download behavior between `Mobility` and `Zones` with lazy data fetching.
+- `pyspainmobility/`: published library code.
+- `tests/`: automated tests; live MITMA downloads are opt-in.
+- `docs/`: Sphinx documentation sources.
+- `examples/`: portable demonstrations; generated images and PDFs stay local.
+- `scripts/`: release checks and reproducible figure generators.
+
+Downloaded MITMA files, analysis outputs, virtual environments and build
+artifacts are ignored by Git. They can make a local checkout much larger but
+are not included in the pip package.
+
+Run the local tests with `python -m pytest -q`. Live MITMA tests are disabled
+by default and can be enabled with `PYSPAINMOBILITY_RUN_LIVE_TESTS=1`.
+Release history is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Backend Selection
 
@@ -107,11 +124,16 @@ mobility = Mobility(
 )
 ```
 
-The Polars backend keeps the public API compatible by returning an Arrow-backed
-`pandas.DataFrame` when `return_df=True`. With `return_df=False`, the processed
+The Polars backend keeps the public API compatible by returning a
+`pandas.DataFrame` when `return_df=True`. With the `arrow` extra installed it
+uses Arrow-backed pandas columns; without it, conversion uses Python values
+and can be slower for large results. With `return_df=False`, the processed
 result is written directly from Polars without materializing an intermediate
 pandas DataFrame. `use_dask=True` is unnecessary and ignored when Polars is
 selected because the lazy multi-file pipeline is already parallel.
+Daily files are aligned by column name, even when their column order differs.
+If one file cannot be parsed, the Polars pipeline retains valid files and
+reports the failed date through `get_acquisition_manifest("Viajes")`.
 
 ### Building sparse mobility networks
 
@@ -261,7 +283,10 @@ If processed OD rows still exist for a manifest day marked `failed`, the
 temporal builder raises by default. This prevents a partial day from entering
 an observed-day average. After reviewing the data loss, callers may explicitly
 remove all rows from such days with `failed_data_policy="exclude"`; the dates
-and excluded flow weight remain in `temporal.audit()`.
+and excluded flow weight remain in `temporal.audit()`. When excluded rows have
+invalid weights, the weight total includes only finite, non-negative values;
+`excluded_failed_invalid_row_count` reports how many excluded rows could not
+be treated as valid OD observations.
 
 Temporal aggregation uses that same definition of observation:
 
@@ -284,6 +309,8 @@ rows in one scan and do not populate the snapshot cache. Snapshots use an LRU
 cache of 32 matrices by default; this bounds the number of cached days, not
 their memory footprint. Set `max_cached_snapshots=0` to avoid retention or
 `None` to retain all snapshots deliberately.
+On a non-partitioned source, iterating every snapshot reads the source once
+per date; partitioning is recommended when individual days will be queried.
 
 ### Spatial aggregation without losing flow
 

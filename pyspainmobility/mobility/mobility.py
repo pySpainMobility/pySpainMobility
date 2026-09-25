@@ -1,5 +1,7 @@
 from pandas.errors import EmptyDataError 
 from pyspainmobility.utils import utils
+import csv
+import gzip
 import os
 import pandas as pd
 import tqdm
@@ -316,7 +318,7 @@ class Mobility:
     def _read_pipe_file_polars(filepath: str, dtype: dict = None) -> pd.DataFrame:
         """
         Read a pipe-separated MITMA file with Polars and expose the result as
-        an Arrow-backed pandas DataFrame for public API compatibility.
+        a pandas DataFrame for public API compatibility.
         """
         if pl is None:
             raise ImportError(
@@ -328,7 +330,7 @@ class Mobility:
             frame = Mobility._scan_pipe_files_polars(filepath).collect(
                 engine="streaming"
             )
-            return frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+            return Mobility._polars_to_pandas(frame)
         except Exception as exc:
             print(
                 f"[warn] Polars parser failed for {filepath}: {exc}. "
@@ -342,6 +344,8 @@ class Mobility:
         """
         if self.backend not in {"arrow", "polars"} or df is None:
             return df
+        if pa is None:
+            return df.convert_dtypes()
         try:
             return df.convert_dtypes(dtype_backend="pyarrow")
         except TypeError:
@@ -383,13 +387,16 @@ class Mobility:
         normalized = normalized.str.replace("/", "", regex=False)
         normalized = normalized.str.replace(" ", "", regex=False)
         normalized = normalized.str.zfill(8)
-        return (
+        formatted = (
             normalized.str.slice(0, 4)
             + "-"
             + normalized.str.slice(4, 6)
             + "-"
             + normalized.str.slice(6, 8)
         )
+        # Formatting alone can turn 20240230 into an apparently valid label.
+        parsed = pd.to_datetime(formatted, format="%Y-%m-%d", errors="coerce")
+        return parsed.dt.strftime("%Y-%m-%d").astype("string")
 
     @staticmethod
     def _to_numeric(series: pd.Series, strip_thousands: bool = False) -> pd.Series:
@@ -439,6 +446,12 @@ class Mobility:
         return pl.col(column).str.strip_chars()
 
     @staticmethod
+    def _polars_nullable_string(column: str):
+        """Normalize missing text markers after trimming source whitespace."""
+        cleaned = Mobility._polars_clean_string(column)
+        return pl.when(cleaned.is_in(["", "NA", "nan", "None"])).then(None).otherwise(cleaned)
+
+    @staticmethod
     def _polars_numeric(column: str, strip_thousands: bool = False):
         """Polars equivalent of :meth:`_to_numeric`."""
         normalized = (
@@ -456,14 +469,14 @@ class Mobility:
     def _polars_date(column: str):
         """Polars equivalent of :meth:`_normalize_date_series`."""
         normalized = (
-            Mobility._polars_clean_string(column)
+            Mobility._polars_nullable_string(column)
             .str.replace(r"\.0+$", "")
             .str.replace_all("-", "", literal=True)
             .str.replace_all("/", "", literal=True)
             .str.replace_all(" ", "", literal=True)
             .str.pad_start(8, "0")
         )
-        return pl.concat_str(
+        formatted = pl.concat_str(
             [
                 normalized.str.slice(0, 4),
                 pl.lit("-"),
@@ -472,38 +485,81 @@ class Mobility:
                 normalized.str.slice(6, 2),
             ]
         )
+        return formatted.str.strptime(pl.Date, "%Y-%m-%d", strict=False).cast(pl.String)
+
+    @staticmethod
+    def _polars_hour(column: str):
+        """Parse an hourly MITMA period, rejecting missing or invalid hours."""
+        normalized = (
+            Mobility._polars_nullable_string(column)
+            .str.replace_all(",", ".", literal=True)
+            .str.replace(r"\.0+$", "")
+        )
+        hour = normalized.cast(pl.Int64, strict=False)
+        return pl.when(hour.is_between(0, 23)).then(hour).otherwise(None)
 
     @staticmethod
     def _polars_identifier(column: str):
         """Polars equivalent of :meth:`_normalize_identifier_series`."""
         return (
-            Mobility._polars_clean_string(column)
+            Mobility._polars_nullable_string(column)
             .str.replace(r"\.0+$", "")
             .str.replace_all(".", "", literal=True)
         )
 
     @staticmethod
     def _scan_pipe_files_polars(filepaths, include_file_paths=False):
-        """Create a normalized lazy scan for one or more MITMA files."""
-        return pl.scan_csv(
-            filepaths,
-            separator="|",
-            encoding="utf8-lossy",
-            infer_schema=False,
-            # ``empty_string_is_null`` was introduced after the last Polars
-            # release supporting Python 3.9.  Listing the empty token as a
-            # null value preserves the same parsing contract across both APIs.
-            null_values=["", "NA", "nan", "None"],
-            with_column_names=lambda columns: [
-                Mobility._normalize_column_name(column) for column in columns
-            ],
-            include_file_paths="_source_path" if include_file_paths else None,
-        )
+        """Align MITMA files by their own header names before lazy concatenation."""
+        paths = [filepaths] if isinstance(filepaths, (str, os.PathLike)) else list(filepaths)
+        scans = [
+            pl.scan_csv(
+                path,
+                separator="|",
+                encoding="utf8-lossy",
+                infer_schema=False,
+                null_values=["", "NA", "nan", "None"],
+                with_column_names=lambda columns: [
+                    Mobility._normalize_column_name(column) for column in columns
+                ],
+                include_file_paths="_source_path" if include_file_paths else None,
+            )
+            for path in paths
+        ]
+        return scans[0] if len(scans) == 1 else pl.concat(scans, how="diagonal_relaxed")
+
+    def _collect_polars_files(self, filepaths, builder, label):
+        """Recover valid dates independently if a batched CSV scan fails."""
+        try:
+            query = builder(filepaths)
+            if query is None:
+                return None, False
+            return query.collect(engine="streaming"), False
+        except Exception as exc:
+            print(f"[warn] Batched {label} processing failed: {exc}. Retrying files individually.")
+
+        recovered = []
+        for path in filepaths:
+            try:
+                query = builder([path])
+                if query is None:
+                    continue
+                frame = query.collect(engine="streaming")
+                if not frame.is_empty():
+                    recovered.append(frame)
+            except Exception as exc:
+                print(f"[warn] Skipping invalid {label} file {path}: {exc}")
+        if not recovered:
+            return None, True
+        return pl.concat(recovered, how="diagonal_relaxed"), True
 
     @staticmethod
     def _polars_to_pandas(frame):
         """Expose a Polars result through the library's pandas API."""
-        return frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+        if pa is not None:
+            return frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+        # Polars' native to_pandas() also requires pyarrow. Keep return_df=True
+        # functional in the smaller base installation.
+        return pd.DataFrame(frame.to_dicts(), columns=frame.columns)
 
     @staticmethod
     def _valid_input_files(filepaths):
@@ -548,9 +604,7 @@ class Mobility:
 
         expressions = [
             self._polars_date("fecha").alias("date"),
-            self._polars_clean_string("periodo")
-            .cast(pl.Int64, strict=False)
-            .alias("hour"),
+            self._polars_hour("periodo").alias("hour"),
             self._polars_identifier("origen").alias("id_origin"),
             self._polars_identifier("destino").alias("id_destination"),
         ]
@@ -599,6 +653,7 @@ class Mobility:
             .drop_nulls(
                 [
                     "date",
+                    "hour",
                     "id_origin",
                     "id_destination",
                     "n_trips",
@@ -624,22 +679,21 @@ class Mobility:
         filepaths = self._valid_input_files(filepaths)
         if not filepaths:
             return None
-        try:
-            query = self._build_od_lazy_polars(
-                filepaths,
-                keep_activity=keep_activity,
-                social_agg=social_agg,
-            )
-            if query is None:
-                return None
-            result = query.collect(engine="streaming")
-            if result.is_empty():
-                print("[warn] No valid OD rows after preprocessing")
-                return None
-            return self._polars_to_pandas(result) if as_pandas else result
-        except Exception as exc:
-            print(f"[ERROR] Error processing OD data with Polars: {exc}")
+        result, recovered = self._collect_polars_files(
+            filepaths,
+            lambda paths: self._build_od_lazy_polars(paths, keep_activity, social_agg),
+            "OD",
+        )
+        if result is None or result.is_empty():
+            print("[warn] No valid OD rows after preprocessing")
             return None
+        if recovered:
+            measures = ["n_trips", "trips_total_length_km"]
+            group_cols = [column for column in result.columns if column not in measures]
+            result = result.group_by(group_cols).agg(
+                *(pl.col(measure).sum() for measure in measures)
+            ).sort(group_cols, nulls_last=True)
+        return self._polars_to_pandas(result) if as_pandas else result
 
     def _process_single_od_file_polars(self, filepath, keep_activity, social_agg):
         """Compatibility wrapper for processing one OD file with Polars."""
@@ -745,16 +799,14 @@ class Mobility:
             df["residence_province_ine_code"] = self._normalize_identifier_series(df["residence_province_ine_code"])
 
         hour_numeric = self._to_numeric(df["hour"])
-        if hour_numeric.notna().all():
-            df["hour"] = hour_numeric.astype(int)
-        else:
-            df["hour"] = df["hour"].astype("string").str.strip()
+        valid_hour = hour_numeric.between(0, 23) & hour_numeric.mod(1).eq(0)
+        df["hour"] = hour_numeric.where(valid_hour).astype("Int64")
 
         df["n_trips"] = self._to_numeric(df["n_trips"], strip_thousands=True)
         df["trips_total_length_km"] = self._to_numeric(df["trips_total_length_km"], strip_thousands=True)
 
         df.dropna(
-            subset=["date", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
+            subset=["date", "hour", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
             inplace=True,
         )
         if df.empty:
@@ -969,17 +1021,12 @@ class Mobility:
         filepaths = self._valid_input_files(filepaths)
         if not filepaths:
             return None
-        try:
-            query = self._build_overnight_lazy_polars(filepaths)
-            if query is None:
-                return None
-            result = query.collect(engine="streaming")
-            if result.is_empty():
-                return None
-            return self._polars_to_pandas(result) if as_pandas else result
-        except Exception as exc:
-            print(f"Error processing overnight-stay data with Polars: {exc}")
+        result, _ = self._collect_polars_files(
+            filepaths, self._build_overnight_lazy_polars, "overnight-stay"
+        )
+        if result is None or result.is_empty():
             return None
+        return self._polars_to_pandas(result) if as_pandas else result
 
     def _build_number_of_trips_lazy_polars(self, filepaths):
         """Build the Polars plan for number-of-trips files."""
@@ -1035,17 +1082,12 @@ class Mobility:
         filepaths = self._valid_input_files(filepaths)
         if not filepaths:
             return None
-        try:
-            query = self._build_number_of_trips_lazy_polars(filepaths)
-            if query is None:
-                return None
-            result = query.collect(engine="streaming")
-            if result.is_empty():
-                return None
-            return self._polars_to_pandas(result) if as_pandas else result
-        except Exception as exc:
-            print(f"Error processing number-of-trips data with Polars: {exc}")
+        result, _ = self._collect_polars_files(
+            filepaths, self._build_number_of_trips_lazy_polars, "number-of-trips"
+        )
+        if result is None or result.is_empty():
             return None
+        return self._polars_to_pandas(result) if as_pandas else result
 
     def _process_single_overnight_file(self, filepath: str):
         """
@@ -1342,6 +1384,22 @@ class Mobility:
                 tuple(filepaths), processed_success
             )
 
+    @staticmethod
+    def _validate_pipe_width(path: str) -> None:
+        """Catch malformed rows that Polars may skip during projection pushdown."""
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8-sig", errors="replace", newline="") as stream:
+            rows = csv.reader(stream, delimiter="|")
+            header = next(rows, None)
+            if header is None:
+                return
+            width = len(header)
+            for line_number, row in enumerate(rows, start=2):
+                if len(row) != width:
+                    raise ValueError(
+                        f"OD source row {line_number} has {len(row)} fields; expected {width}."
+                    )
+
     def _finalize_od_manifest(
         self, m_type: str, filepaths, *, processed_success: bool
     ) -> None:
@@ -1357,27 +1415,29 @@ class Mobility:
         available = manifest["status"].eq("available")
         if not available.any():
             return
-        try:
-            source = self._scan_pipe_files_polars(filepaths, include_file_paths=True)
-            mandatory = {"fecha", "periodo", "origen", "destino", "viajes", "viajes_km"}
-            if not mandatory.issubset(source.collect_schema().names()):
-                raise ValueError("OD source lacks mandatory columns")
-            selected = source.select(
-                pl.col("_source_path"),
-                self._polars_date("fecha")
-                .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
-                .alias("_date"),
-                self._polars_identifier("origen").alias("_origin"),
-                self._polars_identifier("destino").alias("_destination"),
-                self._polars_numeric("viajes", strip_thousands=True).alias("_weight"),
-                self._polars_numeric("viajes_km", strip_thousands=True).alias("_length"),
-            )
-            diagnostics = (
-                selected.group_by("_source_path")
-                .agg(
+        mandatory = {"fecha", "periodo", "origen", "destino", "viajes", "viajes_km"}
+        for index in manifest.index[available]:
+            path = manifest.at[index, "local_path"]
+            try:
+                self._validate_pipe_width(path)
+                source = self._scan_pipe_files_polars(path)
+                if not mandatory.issubset(source.collect_schema().names()):
+                    raise ValueError("OD source lacks mandatory columns")
+                selected = source.select(
+                    self._polars_date("fecha")
+                    .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    .alias("_date"),
+                    self._polars_hour("periodo").alias("_hour"),
+                    self._polars_identifier("origen").alias("_origin"),
+                    self._polars_identifier("destino").alias("_destination"),
+                    self._polars_numeric("viajes", strip_thousands=True).alias("_weight"),
+                    self._polars_numeric("viajes_km", strip_thousands=True).alias("_length"),
+                )
+                diagnostics_query = selected.select(
                     pl.len().alias("row_count"),
                     (
                         pl.col("_date").is_null()
+                        | pl.col("_hour").is_null()
                         | pl.col("_origin").is_null()
                         | pl.col("_origin").eq("")
                         | pl.col("_destination").is_null()
@@ -1388,33 +1448,27 @@ class Mobility:
                         | pl.col("_length").is_null()
                         | ~pl.col("_length").is_finite()
                         | (pl.col("_length") < 0)
-                    )
-                    .sum()
-                    .alias("invalid_rows"),
-                    pl.col("_date").drop_nulls().unique().alias("dates"),
+                    ).sum().alias("invalid_rows"),
                 )
-                .collect(engine="streaming")
-            )
-            by_path = {
-                os.path.abspath(row["_source_path"]): row
-                for row in diagnostics.to_dicts()
-            }
-            for index in manifest.index[available]:
-                path = manifest.at[index, "local_path"]
-                row = by_path.get(os.path.abspath(path)) if path else None
-                if row is None:
+                dates_query = selected.select("_date").drop_nulls().unique()
+                diagnostics, dates = pl.collect_all(
+                    [diagnostics_query, dates_query]
+                )
+                row = diagnostics.row(0, named=True)
+                if not row["row_count"]:
                     manifest.at[index, "parse_status"] = "empty"
                 elif (
                     not processed_success
                     or row["invalid_rows"]
-                    or row["dates"] != [pd.Timestamp(manifest.at[index, "date"]).date()]
+                    or dates.get_column("_date").to_list()
+                    != [pd.Timestamp(manifest.at[index, "date"]).date()]
                 ):
                     manifest.at[index, "parse_status"] = "failed"
                 else:
                     manifest.at[index, "parse_status"] = "valid"
-        except Exception as exc:
-            manifest.loc[available, "parse_status"] = "failed"
-            print(f"[warn] OD source validation failed: {exc}")
+            except Exception as exc:
+                manifest.at[index, "parse_status"] = "failed"
+                print(f"[warn] OD source validation failed for {path}: {exc}")
         failed_dates = manifest.loc[
             available & manifest["parse_status"].eq("failed"), "date"
         ].tolist()

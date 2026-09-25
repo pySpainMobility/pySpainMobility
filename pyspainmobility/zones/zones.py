@@ -2,7 +2,6 @@ from pyspainmobility.utils import utils
 import pandas as pd
 import geopandas as gpd
 import os
-import matplotlib
 from os.path import expanduser
 from typing import Optional
 
@@ -98,8 +97,12 @@ class Zones:
             file_name = link.split("/")[-1]
             local_path = os.path.join(self.output_path, file_name)
 
-            if not os.path.exists(local_path):
-                print("Downloading necessary files....")
+            if (
+                not os.path.exists(local_path)
+                or os.path.getsize(local_path) == 0
+                or file_name.endswith((".gz", ".zip"))
+            ):
+                print("Checking necessary files....")
                 utils.download_file_if_not_existing(link, local_path)
 
             if self.version == 1 and file_name.endswith(".zip"):
@@ -435,23 +438,6 @@ class Zones:
 
         # A row without a source cannot describe a source-to-target mapping.
         mapping = mapping.loc[mapping["source_id"].notna()].copy()
-        missing_target = mapping.loc[mapping["target_id"].isna(), "source_id"]
-        if not missing_target.empty:
-            examples = missing_target.drop_duplicates().head(5).tolist()
-            raise ValueError(
-                "Relation mapping has source IDs without a target in '%s': %s"
-                % (target_column, examples)
-            )
-
-        mapping = mapping.drop_duplicates()
-        target_counts = mapping.groupby("source_id", sort=False)["target_id"].nunique()
-        ambiguous = target_counts.loc[target_counts > 1].index.tolist()
-        if ambiguous:
-            raise ValueError(
-                "Relation mapping is not one-to-one: source IDs map to multiple "
-                "targets in '%s': %s" % (target_column, ambiguous[:5])
-            )
-
         if source_ids is not None:
             if isinstance(source_ids, (str, bytes)):
                 raise TypeError("source_ids must be an iterable of identifiers, not a string.")
@@ -472,6 +458,23 @@ class Zones:
                     % absent[:5].tolist()
                 )
             mapping = mapping.loc[mapping["source_id"].isin(requested)]
+
+        missing_target = mapping.loc[mapping["target_id"].isna(), "source_id"]
+        if not missing_target.empty:
+            examples = missing_target.drop_duplicates().head(5).tolist()
+            raise ValueError(
+                "Relation mapping has source IDs without a target in '%s': %s"
+                % (target_column, examples)
+            )
+
+        mapping = mapping.drop_duplicates()
+        target_counts = mapping.groupby("source_id", sort=False)["target_id"].nunique()
+        ambiguous = target_counts.loc[target_counts > 1].index.tolist()
+        if ambiguous:
+            raise ValueError(
+                "Relation mapping is not one-to-one: source IDs map to multiple "
+                "targets in '%s': %s" % (target_column, ambiguous[:5])
+            )
 
         return mapping.sort_values("source_id", kind="stable").reset_index(drop=True)
 

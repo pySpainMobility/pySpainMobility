@@ -23,14 +23,14 @@ setup(
     python_requires=">=3.9",
     install_requires=[
         "geopandas~=1.0.1",
+        "pandas>=1.5",
         "tqdm>=4.0.0",
-        "matplotlib>=3.0.0",
-        "pyarrow>=8.0.0",
-        "dask[dataframe] >=2024.0",
         "polars>=1.25,<2",
         "scipy>=1.11",
     ],
     extras_require={
+        "arrow": ["pyarrow>=8.0.0"],
+        "dask": ["dask[dataframe]>=2024.0"],
         # for building the Sphinx docs
         "docs": [
             "Sphinx>=4.0.0",
@@ -44,6 +44,8 @@ setup(
             "flake8",
             "networkx>=3.0",
             "infomap>=2.15,<3",
+            "pyarrow>=8.0.0",
+            "dask[dataframe]>=2024.0",
         ],
         # adapters for users who need NetworkX algorithms or visualisation
         "network": [

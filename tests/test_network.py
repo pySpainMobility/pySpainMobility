@@ -1191,6 +1191,32 @@ def test_temporal_failed_data_policy_requires_explicit_full_day_exclusion():
     assert temporal.sum_network().total_weight == 2.0
 
 
+def test_temporal_excludes_invalid_rows_on_manifest_failed_days():
+    od = pl.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "id_origin": ["A", "A"],
+            "id_destination": ["B", "B"],
+            "n_trips": [2.0, -1.0],
+        }
+    )
+    manifest = pl.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "status": ["available", "available"],
+            "parse_status": ["valid", "failed"],
+        }
+    )
+    temporal = build_temporal_network(
+        od, acquisition_manifest=manifest, failed_data_policy="exclude"
+    )
+    audit = temporal.audit()
+    assert audit["excluded_failed_data_dates"] == ["2024-01-02"]
+    assert audit["excluded_failed_invalid_row_count"] == 1
+    assert audit["excluded_failed_data_weight"] == 0.0
+    assert temporal.sum_network().total_weight == 2.0
+
+
 def test_temporal_configuration_cannot_diverge_from_its_snapshot_cache():
     temporal = build_temporal_network(
         pl.DataFrame(
@@ -1324,3 +1350,94 @@ def test_undirected_network_canonicalizes_harmless_sparse_roundoff():
         undirected.node_index,
     )
     assert (restored.adjacency != restored.adjacency.T).nnz == 0
+
+
+def test_network_rejects_missing_numeric_endpoint_and_mapping_ids():
+    with pytest.raises(ValueError, match="invalid endpoint/weight"):
+        build_network(
+            pl.DataFrame(
+                {
+                    "id_origin": [np.nan],
+                    "id_destination": [1.0],
+                    "n_trips": [2.0],
+                }
+            )
+        )
+
+    network = build_network(
+        pl.DataFrame(
+            {"id_origin": ["A"], "id_destination": ["A"], "n_trips": [1.0]}
+        )
+    )
+    for mapping in (
+        {"A": np.nan},
+        pl.DataFrame({"source_id": ["A"], "target_id": [np.nan]}),
+    ):
+        with pytest.raises(ValueError, match="null or empty source/target"):
+            aggregate_network(network, mapping)
+
+
+def test_network_node_universe_rejects_missing_values_before_string_conversion():
+    with pytest.raises(ValueError, match="null IDs"):
+        NodeIndex([np.nan, "B"])
+
+    network = build_network(
+        pl.DataFrame(
+            {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1.0]}
+        )
+    )
+    with pytest.raises(ValueError, match="null IDs"):
+        SparseMobilityNetwork(network.adjacency, [None, "B"], network.metadata)
+
+
+def test_spatial_mapping_accepts_mixed_scalar_id_types():
+    network = build_network(
+        pl.DataFrame(
+            {
+                "id_origin": ["1", "A"],
+                "id_destination": ["A", "1"],
+                "n_trips": [1.0, 2.0],
+            }
+        )
+    )
+    coarse = aggregate_network(network, {1: "X", "A": "Y"})
+    assert coarse.to_edge_table().to_dicts() == [
+        {"id_origin": "X", "id_destination": "Y", "weight": 1.0},
+        {"id_origin": "Y", "id_destination": "X", "weight": 2.0},
+    ]
+
+
+@pytest.mark.parametrize("timestamp", ["2024-01-01T12:30", "2024-01-01 12:30", "2024-01-01T12:30Z"])
+def test_temporal_accepts_minute_precision_iso_timestamps(timestamp):
+    temporal = build_temporal_network(
+        pl.DataFrame(
+            {
+                "date": [timestamp],
+                "id_origin": ["A"],
+                "id_destination": ["B"],
+                "n_trips": [3.0],
+            }
+        )
+    )
+    assert temporal.snapshot("2024-01-01").total_weight == 3.0
+
+
+def test_node_index_rejects_nested_identifiers_before_string_conversion():
+    nested = np.array([["A", "B"], ["C", "D"]])
+    with pytest.raises(ValueError, match="one-dimensional"):
+        NodeIndex(nested)
+    od = pl.DataFrame(
+        {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1.0]}
+    )
+    with pytest.raises(ValueError, match="one-dimensional"):
+        build_network(od, node_ids=nested)
+
+
+def test_destination_cosine_handles_subnormal_positive_weights():
+    network = build_network(
+        pl.DataFrame(
+            {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1e-309]}
+        )
+    )
+    similarity = destination_similarity(network, network)
+    assert similarity["destination_cosine_similarity"].to_list() == [1.0, 1.0]

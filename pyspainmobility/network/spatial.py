@@ -15,7 +15,9 @@ from .builder import (
     _as_lazy_frame,
     _invalid_od_condition,
     _normalized_node_ids,
+    _pandas_to_polars,
     _selected_od_rows,
+    _string_identifier_expression,
     build_network,
 )
 from .model import (
@@ -24,6 +26,7 @@ from .model import (
     NetworkSpec,
     SparseMobilityNetwork,
     _append_provenance,
+    _missing_node_id,
 )
 
 
@@ -39,14 +42,20 @@ def _mapping_table(
     if isinstance(mapping, MappingABC):
         frame = pl.DataFrame(
             {
-                source_column: list(mapping.keys()),
-                target_column: list(mapping.values()),
+                source_column: [
+                    None if _missing_node_id(value) else str(value).strip()
+                    for value in mapping.keys()
+                ],
+                target_column: [
+                    None if _missing_node_id(value) else str(value).strip()
+                    for value in mapping.values()
+                ],
             }
         )
     elif isinstance(mapping, pl.DataFrame):
         frame = mapping
     elif isinstance(mapping, pd.DataFrame):
-        frame = pl.from_pandas(mapping, include_index=False)
+        frame = _pandas_to_polars(mapping)
     elif isinstance(mapping, (str, Path)):
         path = Path(mapping)
         if path.suffix.lower() != ".parquet":
@@ -64,8 +73,8 @@ def _mapping_table(
     if missing:
         raise ValueError("Spatial mapping is missing required columns: %s" % missing)
     table = frame.select(
-        pl.col(source_column).cast(pl.String).str.strip_chars().alias("_source"),
-        pl.col(target_column).cast(pl.String).str.strip_chars().alias("_target"),
+        _string_identifier_expression(source_column, frame.schema[source_column]).alias("_source"),
+        _string_identifier_expression(target_column, frame.schema[target_column]).alias("_target"),
     )
     invalid = table.filter(
         pl.col("_source").is_null()

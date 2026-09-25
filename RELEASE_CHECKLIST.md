@@ -6,11 +6,13 @@ Use this checklist for every release so pip and conda stay aligned.
    - `setup.py`
    - `pyspainmobility/__init__.py`
    - `conda-recipes/pyspainmobility/meta.yaml`
+   - Sync conda runtime dependencies with the base pip dependencies; optional
+     pip extras must not remain mandatory in the conda recipe.
 2. Run version sync check:
    - `python scripts/check_version_sync.py`
 3. Run tests:
    - `pytest -q`
-   - Optional live smoke test (real MITMA download/parsing pipeline): `PYSPAINMOBILITY_RUN_LIVE_TESTS=1 pytest -q test_live_pipeline_smoke.py`
+   - Optional live smoke test (real MITMA download/parsing pipeline): `PYSPAINMOBILITY_RUN_LIVE_TESTS=1 pytest -q tests/test_live_pipeline_smoke.py`
 4. Build and validate PyPI artifacts:
    - `python -m build`
    - `python -m twine check dist/*`
