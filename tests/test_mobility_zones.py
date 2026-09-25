@@ -51,7 +51,7 @@ def _build_mobility(
         backend=backend,
         use_dask=use_dask,
     )
-    monkeypatch.setattr(mobility, "_saving_parquet", lambda *_: None)
+    monkeypatch.setattr(mobility, "_saving_parquet", lambda *_, **__: None)
     return mobility
 
 
@@ -744,7 +744,7 @@ def test_polars_processes_multiple_od_files_in_one_result(monkeypatch, tmp_path)
     monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: files)
     saved = {}
 
-    def fake_save(frame, _m_type):
+    def fake_save(frame, _m_type, **_kwargs):
         saved["is_polars"] = isinstance(frame, mobility_module.pl.DataFrame)
 
     monkeypatch.setattr(mobility, "_saving_parquet", fake_save)
@@ -775,7 +775,7 @@ def test_polars_return_false_does_not_materialize_pandas(monkeypatch, tmp_path):
     monkeypatch.setattr(
         mobility,
         "_saving_parquet",
-        lambda frame, _m_type: saved.setdefault(
+        lambda frame, _m_type, **_kwargs: saved.setdefault(
             "is_polars", isinstance(frame, mobility_module.pl.DataFrame)
         ),
     )
@@ -797,6 +797,203 @@ def test_saving_parquet_accepts_native_polars_frame(tmp_path):
 
     output = tmp_path / "Viajes_municipalities_2022-01-01_2022-01-01_v2.parquet"
     assert pd.read_parquet(output)["value"].tolist() == [1, 2]
+
+
+def test_od_output_options_and_partial_results_have_distinct_paths(tmp_path):
+    mobility = Mobility.__new__(Mobility)
+    mobility.output_path = str(tmp_path)
+    mobility.zones = "municipalities"
+    mobility.start_date = "2022-01-01"
+    mobility.end_date = "2022-01-02"
+    mobility.version = 2
+    frame = mobility_module.pl.DataFrame({"value": [1]})
+
+    mobility._saving_parquet(frame, "Viajes")
+    mobility._saving_parquet(frame, "Viajes", keep_activity=True)
+    mobility._saving_parquet(frame, "Viajes", social_agg=True, partial=True)
+
+    assert sorted(path.name for path in tmp_path.glob("*.parquet")) == [
+        "Viajes_municipalities_2022-01-01_2022-01-02_v2.parquet",
+        "Viajes_municipalities_2022-01-01_2022-01-02_v2_activity.parquet",
+        "Viajes_municipalities_2022-01-01_2022-01-02_v2_social_partial.parquet",
+    ]
+
+
+def test_pandas_parquet_save_works_without_optional_arrow_engine(monkeypatch, tmp_path):
+    mobility = Mobility.__new__(Mobility)
+    mobility.output_path = str(tmp_path)
+    mobility.zones = "municipalities"
+    mobility.start_date = "2022-01-01"
+    mobility.end_date = "2022-01-01"
+    mobility.version = 2
+    frame = pd.DataFrame(
+        {"date": pd.Series(["2022-01-01"], dtype="string"), "weight": [2.0]}
+    )
+
+    def missing_engine(*_args, **_kwargs):
+        raise ImportError("no optional parquet engine")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", missing_engine)
+    mobility._saving_parquet(frame, "Viajes")
+
+    saved = tmp_path / "Viajes_municipalities_2022-01-01_2022-01-01_v2.parquet"
+    assert mobility_module.pl.read_parquet(saved).to_dicts() == [
+        {"date": "2022-01-01", "weight": 2.0}
+    ]
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars", "dask_fallback"])
+def test_od_rejects_missing_day_and_labels_explicit_partial_result(
+    monkeypatch, tmp_path, backend
+):
+    if backend == "dask_fallback":
+        mobility = _build_mobility_dask(
+            monkeypatch, tmp_path, end_date="2022-01-02"
+        )
+    else:
+        mobility = _build_mobility(
+            monkeypatch, tmp_path, backend=backend, end_date="2022-01-02"
+        )
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility)
+    )
+
+    def fake_download(_url, path):
+        if "20220102" in path:
+            raise RuntimeError("upstream unavailable")
+        _write_gzip(
+            Path(path),
+            "fecha|periodo|origen|destino|viajes|viajes_km\n"
+            "20220101|0|A|B|2|4\n",
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    with pytest.raises(RuntimeError, match="unavailable dates"):
+        mobility.get_od_data(return_df=True)
+    assert list(Path(mobility.output_path).glob("*.parquet")) == []
+    assert mobility.get_acquisition_manifest("Viajes")["status"].tolist() == [
+        "available", "failed"
+    ]
+
+    result = mobility.get_od_data(return_df=True, allow_partial=True)
+    assert result["n_trips"].tolist() == [2.0]
+    saved = list(Path(mobility.output_path).glob("*.parquet"))
+    assert len(saved) == 1
+    assert saved[0].name.endswith("_v2_partial.parquet")
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_od_invalid_weights_fail_closed_and_partial_excludes_the_day(
+    monkeypatch, tmp_path, backend
+):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend=backend)
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility)
+    )
+
+    def fake_download(_url, path):
+        _write_gzip(
+            Path(path),
+            "fecha|periodo|origen|destino|viajes|viajes_km\n"
+            "20220101|0|A|B|2|4\n"
+            "20220101|0|C|D|-1|3\n"
+            "20220101|0|E|F|NaN|3\n",
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        with pytest.raises(RuntimeError, match="invalid dates"):
+            mobility.get_od_data(return_df=True)
+    assert list(Path(mobility.output_path).glob("*.parquet")) == []
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "failed"
+    ]
+
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        assert mobility.get_od_data(return_df=True, allow_partial=True) is None
+    assert list(Path(mobility.output_path).glob("*.parquet")) == []
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars", "dask_fallback"])
+def test_explicit_partial_od_keeps_only_valid_source_days(
+    monkeypatch, tmp_path, backend
+):
+    if backend == "dask_fallback":
+        mobility = _build_mobility_dask(
+            monkeypatch, tmp_path, end_date="2022-01-02"
+        )
+    else:
+        mobility = _build_mobility(
+            monkeypatch, tmp_path, backend=backend, end_date="2022-01-02"
+        )
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility)
+    )
+
+    def fake_download(_url, path):
+        day = "20220102" if "20220102" in path else "20220101"
+        bad_row = f"{day}|0|C|D|-1|3\n" if day == "20220102" else ""
+        _write_gzip(
+            Path(path),
+            "fecha|periodo|origen|destino|viajes|viajes_km\n"
+            f"{day}|0|A|B|2|4\n" + bad_row,
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        result = mobility.get_od_data(return_df=True, allow_partial=True)
+    assert result["date"].tolist() == ["2022-01-01"]
+    assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
+        "valid", "failed"
+    ]
+    saved = next(Path(mobility.output_path).glob("*.parquet"))
+    assert saved.name.endswith("_partial.parquet")
+    assert mobility_module.pl.read_parquet(saved)["date"].to_list() == [
+        "2022-01-01"
+    ]
+
+
+@pytest.mark.parametrize(
+    "method_name,source_row",
+    [
+        (
+            "get_overnight_stays_data",
+            "fecha|zona_residencia|zona_pernoctacion|personas\n"
+            "20220101|A|B|2\n",
+        ),
+        (
+            "get_number_of_trips_data",
+            "fecha|zona_pernoctacion|numero_viajes|personas\n"
+            "20220101|A|1|2\n",
+        ),
+    ],
+)
+def test_other_daily_outputs_reject_missing_downloads(
+    monkeypatch, tmp_path, method_name, source_row
+):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend="polars", end_date="2022-01-02"
+    )
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility)
+    )
+
+    def fake_download(_url, path):
+        if "20220102" in path:
+            raise RuntimeError("upstream unavailable")
+        _write_gzip(Path(path), source_row)
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    method = getattr(mobility, method_name)
+    with pytest.raises(RuntimeError, match="unavailable dates"):
+        method(return_df=True)
+    assert list(Path(mobility.output_path).glob("*.parquet")) == []
+
+    result = method(return_df=True, allow_partial=True)
+    assert result["date"].tolist() == ["2022-01-01"]
+    assert next(Path(mobility.output_path).glob("*.parquet")).name.endswith(
+        "_partial.parquet"
+    )
 
 
 @pytest.mark.parametrize("backend", ["pandas", "arrow", "polars"])
@@ -840,7 +1037,7 @@ def test_get_od_data_return_df_false_still_saves_file(monkeypatch, tmp_path):
 
     saved = {}
 
-    def fake_save(df, m_type):
+    def fake_save(df, m_type, **_kwargs):
         saved["rows"] = len(df)
         saved["m_type"] = m_type
 

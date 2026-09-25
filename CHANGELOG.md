@@ -11,6 +11,13 @@ All notable changes to this project are documented in this file.
   columns, so requesting them now raises a clear error.
 
 ### Fixed
+- Refuse to save date-range outputs when daily downloads are missing, or OD
+  source days contain invalid mandatory rows; explicitly requested partial OD
+  results exclude invalid days and use a `_partial` filename suffix.
+- Keep OD output variants for activity and demographic dimensions in separate
+  Parquet files, and replace finished files atomically.
+- Exclude negative and non-finite OD trip and distance weights across pandas
+  and Polars, and let the pandas backend write Parquet without optional Arrow.
 - Validate OD calendar dates and hourly periods before including rows; flag
   invalid source days in acquisition manifests on both pandas and Polars paths.
 - Apply failed-day exclusion before validating OD rows and report excluded

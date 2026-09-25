@@ -1102,7 +1102,7 @@ def test_mobility_manifest_excludes_invalid_parsed_day_from_temporal_mean(tmp_pa
         temporal.mean_per_observed_day(["2024-01-02"])
 
 
-def test_mobility_od_pipeline_lazily_validates_manifest_after_processing(
+def test_mobility_od_pipeline_validates_manifest_before_saving(
     tmp_path, monkeypatch
 ):
     header = "fecha|periodo|origen|destino|viajes|viajes_km\n"
@@ -1134,13 +1134,18 @@ def test_mobility_od_pipeline_lazily_validates_manifest_after_processing(
         return [str(good), str(bad)]
 
     monkeypatch.setattr(mobility, "_donwload_helper", fake_download)
-    od = mobility.get_od_data(return_df=True)
-    assert od["n_trips"].sum() == 10.0
-    assert mobility._acquisition_manifests["Viajes"]["parse_status"].tolist() == [
-        "not_processed", "not_processed"
-    ]
     with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
-        manifest = mobility.get_acquisition_manifest("Viajes")
+        with pytest.raises(RuntimeError, match="invalid dates"):
+            mobility.get_od_data(return_df=True)
+    assert not list(tmp_path.glob("*.parquet"))
+    assert mobility._acquisition_manifests["Viajes"]["parse_status"].tolist() == [
+        "valid", "failed"
+    ]
+
+    with pytest.warns(RuntimeWarning, match="OD source parsing failed"):
+        od = mobility.get_od_data(return_df=True, allow_partial=True)
+    assert od["n_trips"].sum() == 10.0
+    manifest = mobility.get_acquisition_manifest("Viajes")
     assert manifest["parse_status"].tolist() == ["valid", "failed"]
     temporal = build_temporal_network(od, acquisition_manifest=manifest)
     assert temporal.mean_per_observed_day().total_weight == 10.0

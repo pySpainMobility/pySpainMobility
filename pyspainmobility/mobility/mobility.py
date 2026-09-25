@@ -1,13 +1,17 @@
-from pandas.errors import EmptyDataError 
-from pyspainmobility.utils import utils
 import csv
 import gzip
 import os
-import pandas as pd
-import tqdm
+import tempfile
 import warnings
 from os.path import expanduser
 from typing import Optional
+
+import numpy as np
+import pandas as pd
+import tqdm
+from pandas.errors import EmptyDataError
+
+from pyspainmobility.utils import utils
 
 # Optional Arrow import – used when backend='arrow'
 try:
@@ -660,6 +664,12 @@ class Mobility:
                     "trips_total_length_km",
                 ]
             )
+            .filter(
+                pl.col("n_trips").is_finite()
+                & (pl.col("n_trips") >= 0)
+                & pl.col("trips_total_length_km").is_finite()
+                & (pl.col("trips_total_length_km") >= 0)
+            )
             .group_by(group_cols)
             .agg(
                 pl.col("n_trips").sum(),
@@ -809,6 +819,13 @@ class Mobility:
             subset=["date", "hour", "id_origin", "id_destination", "n_trips", "trips_total_length_km"],
             inplace=True,
         )
+        valid_weight = (
+            np.isfinite(df["n_trips"].to_numpy(dtype=float))
+            & np.isfinite(df["trips_total_length_km"].to_numpy(dtype=float))
+            & df["n_trips"].ge(0).to_numpy(dtype=bool)
+            & df["trips_total_length_km"].ge(0).to_numpy(dtype=bool)
+        )
+        df = df.loc[valid_weight]
         if df.empty:
             print(f"[warn] {os.path.basename(filepath)} has no valid rows after preprocessing, skipped")
             return None
@@ -842,7 +859,62 @@ class Mobility:
         
         return df
 
-    def get_od_data(self, keep_activity: bool = False, return_df: bool = False,  social_agg: bool = False,):
+    def _check_acquisition_coverage(self, m_type: str, allow_partial: bool) -> bool:
+        """Reject missing requested files before publishing a dated result."""
+        if not isinstance(allow_partial, bool):
+            raise TypeError("allow_partial must be a bool.")
+        manifest = self._acquisition_manifests.get(m_type)
+        if manifest is None:
+            return False
+        incomplete = manifest.loc[manifest["status"] != "available", "date"].tolist()
+        if incomplete and not allow_partial:
+            raise RuntimeError(
+                "Cannot publish incomplete %s data; unavailable dates: %s. "
+                "Retry the download or pass allow_partial=True explicitly."
+                % (m_type, incomplete[:5])
+            )
+        return bool(incomplete)
+
+    def _check_od_processing_coverage(
+        self, m_type: str, filepaths, processed_success: bool, allow_partial: bool
+    ) -> bool:
+        """Validate OD source files before saving their processed result."""
+        self._remember_od_processing(m_type, filepaths, processed_success)
+        if m_type not in self._acquisition_manifests:
+            return False
+        manifest = self.get_acquisition_manifest(m_type)
+        incomplete = manifest.loc[
+            manifest["status"].ne("available")
+            | manifest["parse_status"].eq("failed"),
+            "date",
+        ].tolist()
+        if incomplete and not allow_partial:
+            raise RuntimeError(
+                "Cannot publish incomplete %s data; missing or invalid dates: %s. "
+                "Review get_acquisition_manifest() or pass allow_partial=True."
+                % (m_type, incomplete[:5])
+            )
+        return bool(incomplete)
+
+    def _keep_valid_od_days(self, frame, m_type: str):
+        """Exclude entire invalid source days from an explicit partial result."""
+        manifest = self._acquisition_manifests.get(m_type)
+        if manifest is None:
+            return frame
+        valid_days = set(
+            manifest.loc[manifest["parse_status"].eq("valid"), "date"].tolist()
+        )
+        if pl is not None and isinstance(frame, pl.DataFrame):
+            return frame.filter(pl.col("date").is_in(valid_days))
+        return frame.loc[frame["date"].isin(valid_days)].copy()
+
+    def get_od_data(
+        self,
+        keep_activity: bool = False,
+        return_df: bool = False,
+        social_agg: bool = False,
+        allow_partial: bool = False,
+    ):
         """
         Function to download and save the origin-destination data.
 
@@ -862,6 +934,12 @@ class Mobility:
         • income:  <10 k, 10 to 15 k, >15 k € (in thousands)  
         • age:  0 to 24, 25 to 44, 45 to 64, >65 yrs, NA  
         • gender:  male, female, NA  
+
+        allow_partial : bool
+            If False (default), fail before saving when a requested daily file
+            is missing or has invalid mandatory OD rows. If True, save only
+            fully valid source days with a ``_partial`` filename suffix and
+            inspect ``get_acquisition_manifest()`` for excluded dates.
 
         
         Examples
@@ -893,6 +971,7 @@ class Mobility:
             social_agg = False
 
         local_list = self._donwload_helper(m_type)
+        acquisition_partial = self._check_acquisition_coverage(m_type, allow_partial)
         print("Generating parquet file for ODs....")
 
         if self.backend == "polars":
@@ -902,11 +981,21 @@ class Mobility:
                 social_agg=social_agg,
                 as_pandas=False,
             )
-            self._remember_od_processing(m_type, local_list, frame is not None)
+            processing_partial = self._check_od_processing_coverage(
+                m_type, local_list, frame is not None, allow_partial
+            )
             if frame is None:
                 print("No valid data found")
                 return None
-            self._saving_parquet(frame, m_type)
+            if processing_partial:
+                frame = self._keep_valid_od_days(frame, m_type)
+                if frame.is_empty():
+                    print("No valid data found")
+                    return None
+            self._saving_parquet(
+                frame, m_type, keep_activity=keep_activity, social_agg=social_agg,
+                partial=acquisition_partial or processing_partial,
+            )
             return self._polars_to_pandas(frame) if return_df else None
 
         if self.use_dask:
@@ -916,6 +1005,8 @@ class Mobility:
                 keep_activity,
                 social_agg,
                 return_df,
+                allow_partial,
+                acquisition_partial,
             )
 
         frames = []
@@ -929,18 +1020,31 @@ class Mobility:
                 frames.append(result)
 
         if not frames:
-            self._remember_od_processing(m_type, local_list, False)
+            self._check_od_processing_coverage(m_type, local_list, False, allow_partial)
             print("No valid data found")
             return None
 
         print("Concatenating all the dataframes....")
         frame = frames[0] if len(frames) == 1 else pd.concat(frames)
         frame = self._finalize_backend_dataframe(frame)
-        self._remember_od_processing(m_type, local_list, True)
-        self._saving_parquet(frame, m_type)
+        processing_partial = self._check_od_processing_coverage(
+            m_type, local_list, True, allow_partial
+        )
+        if processing_partial:
+            frame = self._keep_valid_od_days(frame, m_type)
+            if frame.empty:
+                print("No valid data found")
+                return None
+        self._saving_parquet(
+            frame, m_type, keep_activity=keep_activity, social_agg=social_agg,
+            partial=acquisition_partial or processing_partial,
+        )
         return frame if return_df else None
 
-    def _process_od_data_dask(self, local_list, m_type, keep_activity, social_agg, return_df):
+    def _process_od_data_dask(
+        self, local_list, m_type, keep_activity, social_agg, return_df,
+        allow_partial, acquisition_partial,
+    ):
         """Process OD data using Dask for better performance with large datasets """
         print("Processing with Dask...")
         
@@ -971,16 +1075,26 @@ class Mobility:
         valid_dfs = [df for df in processed_dfs if df is not None]
         
         if not valid_dfs:
-            self._remember_od_processing(m_type, local_list, False)
+            self._check_od_processing_coverage(m_type, local_list, False, allow_partial)
             print("No valid data found")
             return None
         
         print("Concatenating results...")
         df = pd.concat(valid_dfs, ignore_index=True)
         df = self._finalize_backend_dataframe(df)
-        self._remember_od_processing(m_type, local_list, True)
+        processing_partial = self._check_od_processing_coverage(
+            m_type, local_list, True, allow_partial
+        )
+        if processing_partial:
+            df = self._keep_valid_od_days(df, m_type)
+            if df.empty:
+                print("No valid data found")
+                return None
         
-        self._saving_parquet(df, m_type)
+        self._saving_parquet(
+            df, m_type, keep_activity=keep_activity, social_agg=social_agg,
+            partial=acquisition_partial or processing_partial,
+        )
         return df if return_df else None
 
     def _build_overnight_lazy_polars(self, filepaths):
@@ -1240,7 +1354,7 @@ class Mobility:
             return None
         return pd.concat(valid_frames, ignore_index=True)
 
-    def get_overnight_stays_data(self, return_df: bool = False):
+    def get_overnight_stays_data(self, return_df: bool = False, allow_partial: bool = False):
         """
         Function to download and save the overnight stays data.
 
@@ -1248,6 +1362,9 @@ class Mobility:
         ----------
         return_df : bool
             Default value is False. If True, the function will return the dataframe in addition to saving it to a file.
+        allow_partial : bool
+            Save with a ``_partial`` suffix if any requested daily download failed.
+            By default, missing days raise an error before saving.
         Examples
         --------
 
@@ -1269,6 +1386,7 @@ class Mobility:
 
         m_type = "Pernoctaciones"
         local_list = self._donwload_helper(m_type)
+        partial = self._check_acquisition_coverage(m_type, allow_partial)
         print("Generating parquet file for Overnight Stays....")
 
         if self.backend == "polars":
@@ -1287,12 +1405,12 @@ class Mobility:
             print("No valid data found")
             return None
 
-        self._saving_parquet(frame, m_type)
+        self._saving_parquet(frame, m_type, partial=partial)
         if not return_df:
             return None
         return self._polars_to_pandas(frame) if self.backend == "polars" else frame
 
-    def get_number_of_trips_data(self, return_df: bool = False):
+    def get_number_of_trips_data(self, return_df: bool = False, allow_partial: bool = False):
         """
         Function to download and save the data regarding the number of trips to an area of certain demographic categories.
 
@@ -1300,6 +1418,9 @@ class Mobility:
         ----------
         return_df : bool
             Default value is False. If True, the function will return the dataframe in addition to saving it to a file.
+        allow_partial : bool
+            Save with a ``_partial`` suffix if any requested daily download failed.
+            By default, missing days raise an error before saving.
         Examples
         --------
 
@@ -1318,6 +1439,7 @@ class Mobility:
         """
         m_type = "Personas" if self.version == 2 else "maestra2"
         local_list = self._donwload_helper(m_type)
+        partial = self._check_acquisition_coverage(m_type, allow_partial)
         print("Generating parquet file for Number of Trips....")
 
         if self.backend == "polars":
@@ -1336,21 +1458,53 @@ class Mobility:
             print("No valid data found")
             return None
 
-        self._saving_parquet(frame, m_type)
+        self._saving_parquet(frame, m_type, partial=partial)
         if not return_df:
             return None
         return self._polars_to_pandas(frame) if self.backend == "polars" else frame
 
-    def _saving_parquet(self, df, m_type: str):
+    def _saving_parquet(
+        self, df, m_type: str, *, keep_activity: bool = False,
+        social_agg: bool = False, partial: bool = False,
+    ):
         print('Writing the parquet file....')
+        stem = f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}"
+        if m_type in ("Viajes", "maestra1"):
+            if keep_activity:
+                stem += "_activity"
+            if social_agg:
+                stem += "_social"
+        if partial:
+            stem += "_partial"
         output_file = os.path.join(
             self.output_path,
-            f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}.parquet",
+            f"{stem}.parquet",
         )
-        if pl is not None and isinstance(df, pl.DataFrame):
-            df.write_parquet(output_file)
-        else:
-            df.to_parquet(output_file, index=False)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{stem}.", suffix=".parquet", dir=self.output_path,
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+        try:
+            if pl is not None and isinstance(df, pl.DataFrame):
+                df.write_parquet(temporary_path)
+            else:
+                try:
+                    df.to_parquet(temporary_path, index=False)
+                except ImportError:
+                    # Pandas needs an optional Parquet engine. Polars is a base
+                    # dependency and can write the selected pandas backend too.
+                    columns = {
+                        column: df[column].astype(object)
+                        .where(df[column].notna(), None)
+                        .tolist()
+                        for column in df.columns
+                    }
+                    pl.DataFrame(columns).write_parquet(temporary_path)
+            os.replace(temporary_path, output_file)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
         print('Parquet file generated successfully at ', output_file)
 
     def get_acquisition_manifest(self, m_type: str = "Viajes") -> pd.DataFrame:

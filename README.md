@@ -134,8 +134,20 @@ result is written directly from Polars without materializing an intermediate
 pandas DataFrame. `use_dask=True` is unnecessary and ignored when Polars is
 selected because the lazy multi-file pipeline is already parallel.
 Daily files are aligned by column name, even when their column order differs.
-If one file cannot be parsed, the Polars pipeline retains valid files and
-reports the failed date through `get_acquisition_manifest("Viajes")`.
+OD results are saved only after every requested daily download and source file
+has been checked. A missing download or invalid OD day raises an error and is
+recorded by `get_acquisition_manifest("Viajes")`. To work deliberately with
+incomplete data, pass `allow_partial=True`: failed OD days are excluded, and
+the saved filename ends in `_partial.parquet`. Overnight stays and trip-count
+downloads also require every requested file unless `allow_partial=True`.
+
+The default OD output retains its original filename. `keep_activity=True`
+adds `_activity`, and `social_agg=True` adds `_social` before `.parquet`, so
+running different analyses does not overwrite their files. For example,
+`_v2_activity_social_partial.parquet` identifies an incomplete OD result with
+both dimensions retained. Parquet output is written through a temporary file
+and then moved into place, so an interrupted write does not leave a partly
+written result at the final filename.
 
 ### Building sparse mobility networks
 
