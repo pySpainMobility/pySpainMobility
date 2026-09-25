@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+- Version 1 OD data can retain origin and destination activity with
+  `get_od_data(keep_activity=True)`, including the version 1 `trabajo` and
+  `otros` labels across all processing backends.
+
 ## [2.0.0] - 2026-09-22
 
 This major release introduces an auditable sparse-network analysis API and

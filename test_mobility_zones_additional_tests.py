@@ -632,6 +632,50 @@ def test_get_od_data_version1_translates_headers_and_schema(
     assert df.loc[0, "id_destination"] == "01009"
 
 
+@pytest.mark.parametrize("backend", ["pandas", "arrow", "polars", "dask_fallback"])
+def test_get_od_data_version1_keeps_and_translates_activity(
+    monkeypatch,
+    tmp_path,
+    backend,
+):
+    if backend == "dask_fallback":
+        mobility = _build_mobility_dask(monkeypatch, tmp_path, version=1)
+    else:
+        mobility = _build_mobility(monkeypatch, tmp_path, backend=backend, version=1)
+
+    file_path = tmp_path / "od_v1_activity.txt.gz"
+    content = (
+        "fecha|periodo|origen|destino|actividad_origen|actividad_destino|viajes|viajes_km\n"
+        "20200311|00|01001|01009|trabajo|otros|2|3\n"
+        "20200311|00|01001|01009|trabajo_estudio|otros|4|5\n"
+        "20200311|00|01001|01009|casa|frecuente|1|2\n"
+    )
+    _write_gzip(file_path, content)
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+
+    df = mobility.get_od_data(keep_activity=True, social_agg=True, return_df=True)
+
+    assert list(df.columns) == [
+        "date",
+        "hour",
+        "id_origin",
+        "id_destination",
+        "activity_origin",
+        "activity_destination",
+        "n_trips",
+        "trips_total_length_km",
+    ]
+    rows = {
+        (row.activity_origin, row.activity_destination):
+        (row.n_trips, row.trips_total_length_km)
+        for row in df.itertuples(index=False)
+    }
+    assert rows == {
+        ("work_or_study", "other"): (6, 8),
+        ("home", "other_frequent"): (1, 2),
+    }
+
+
 def test_get_od_data_keeps_activity_and_social_dimensions(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="pandas")
 
