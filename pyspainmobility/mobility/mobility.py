@@ -798,8 +798,8 @@ class Mobility:
         ----------
         keep_activity : bool
             Default value is False. If True, the columns 'activity_origin' and 'activity_destination' will be kept in the final dataframe. If False, the columns will be dropped.
-            The columns contain the activity of the origin and destination zones. The possible values are: 'home', 'work_or_study', 'other_frequent', 'other_non_frequent', and 'other' (version 1).
-            Available for both version 1 and version 2. Version 1 does not support social_agg.
+            The columns contain the activity of the origin and destination zones. Version 1 district values are 'home', 'work_or_study', and 'other'. Version 2 values are 'home', 'work_or_study', 'other_frequent', and 'other_non_frequent'.
+            For version 1, activity is available for districts only; municipality source files have no activity columns. Version 1 does not support social_agg.
             Consider that keeping the activity columns will increase the size of the final dataframe and the saved files significantly.
 
         return_df : bool
@@ -833,6 +833,11 @@ class Mobility:
 
         m_type = "Viajes" if self.version == 2 else "maestra1"
         if self.version == 1:
+            if keep_activity and self.zones == "municipios":
+                raise ValueError(
+                    "Version 1 municipality OD files do not contain activity columns. "
+                    "Use zones='districts' or keep_activity=False."
+                )
             social_agg = False
 
         local_list = self._donwload_helper(m_type)
