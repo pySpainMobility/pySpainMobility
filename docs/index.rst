@@ -12,7 +12,7 @@ pySpainMobility Documentation
 
 **Standardized access to Spain's official mobility datasets**
 
-Welcome to the documentation for pySpainMobility - an open-source Python package developed by the research community to access, download, and standardize mobility data published by the `Spanish Ministry of Transportation and Sustainable Mobility <https://www.transportes.gob.es>`_.
+Welcome to the documentation for pySpainMobility, an open-source Python package for accessing and analysing mobility data published by the `Spanish Ministry of Transportation and Sustainable Mobility <https://www.transportes.gob.es>`_.
 
 .. note::
    Please report issues or suggestions via our `GitHub repository <https://github.com/pySpainMobility/pySpainMobility/issues>`_.
@@ -27,8 +27,15 @@ Key Features
    - Time periods from February 2020 to 2021 and from 2022 to present
 - 📦 Standardized data structures for consistent analysis
 - 🌐 Built-in spatial tessellation handling
-- ⚡ Arrow-first mobility parsing with automatic pandas fallback
+- ⚡ Polars processing by default, with optional Arrow and pandas backends
+- 🕸️ Sparse OD networks, temporal comparisons, spatial aggregation, and optional NetworkX and Infomap adapters
 - 📈 Designed for research reproducibility and policy applications
+
+.. note::
+   This site follows the repository's ``main`` branch. Source changes made after
+   a package release may appear here before they are available through pip or
+   conda. Check the `release history <https://pypi.org/project/pyspainmobility/#history>`_
+   for the version you have installed.
 
 ********************
 Getting Started
@@ -38,11 +45,19 @@ Installation
 ==========================
 .. code-block:: bash
 
-   # Using conda
-   conda install -c conda-forge pyspainmobility
-
-   # pip installation
    pip install pyspainmobility
+
+The base package includes the SciPy sparse network representation. Install
+optional adapters only when you need them:
+
+.. code-block:: bash
+
+   pip install 'pyspainmobility[network]'  # NetworkX
+   pip install 'pyspainmobility[infomap]'  # community detection
+
+For a conda environment, create an environment with Python and pip first, then
+use the same pip command. Check the package metadata for the Python version
+required by the release you install.
 
 **********************
 Citing pySpainMobility
@@ -73,8 +88,15 @@ Documentation Contents
 ************************
 
 .. toctree::
+   :caption: Guides
+   :maxdepth: 2
+
+   network
+
+.. toctree::
    :caption: API Reference
    :maxdepth: 2
 
    reference/mobility
    reference/zones
+   reference/network

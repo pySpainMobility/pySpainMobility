@@ -1,6 +1,7 @@
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 from .mobility.mobility import Mobility  # noqa
+from .mobility.selection import select_od  # noqa
 from .network import (  # noqa
     CommunityPartition,
     NetworkComparison,
@@ -24,6 +25,7 @@ from .zones.zones import Zones  # noqa
 
 __all__ = [
     "Mobility",
+    "select_od",
     "Zones",
     "NetworkSpec",
     "CommunityPartition",

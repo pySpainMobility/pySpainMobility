@@ -4,13 +4,38 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [2.1.0] - 2026-09-27
+
 ### Added
+- Derived provincial products with `Mobility(zones="provinces")` for OD,
+  overnight stays and trip-count distributions, using district sources.
+  Preserve temporal/category breakdowns and internal flows; warn about
+  unmappable zones and report excluded rows, trips, kilometres and people
+  by date in manifests, returned DataFrame attributes and provenance JSON.
+- `Zones(zones="provinces")` dissolves mapped district geometries and reports
+  unmapped zones and geometry repairs. These are derived MITMA boundaries.
+- Optional explicit exclusion of incomplete province mappings with
+  `get_province_mapping(unmapped="exclude")`; strict validation remains default.
+- Explicit OD dimension selection with `get_od_data(dimensions=...)`, including
+  residence and distance categories, and lazy `select_od()` filtering and
+  additive aggregation of processed OD data.
 - Version 1 district OD data can retain origin and destination activity with
   `get_od_data(keep_activity=True)`, including the `trabajo` and `otros`
   labels across all processing backends. Municipality files lack activity
   columns, so requesting them now raises a clear error.
 
 ### Fixed
+- Derive province mappings before checking territorial uniqueness, accepting
+  zones containing several municipalities in one province. Support version-1
+  relation sets and infer the source level from `Zones`; reject cross-province
+  zones and missing or invalid municipality codes with source ID diagnostics,
+  including province prefixes outside the INE range 01–52.
+- Reject trailing characters and extra digits in source dates across OD,
+  overnight-stay and trip-count parsing and acquisition manifests.
+- Avoid overflow in global cosine similarity for subnormal positive weights,
+  and preserve nested community parameters and metrics when using pickle.
+- Set a finite socket timeout for RSS discovery and downloads, preserving
+  existing cached files and cleaning up staged downloads when a timeout occurs.
 - Validate every overnight-stay and trip-count source day before publishing a
   complete period. Reject malformed rows, missing identifiers, date mismatches,
   and negative or non-finite people counts; exclude failed days from explicit
@@ -41,6 +66,11 @@ All notable changes to this project are documented in this file.
   for subnormal positive weights.
 
 ### Changed
+- Consolidate repeated test setup and run optional network adapters in a
+  dedicated CI job; include provincial products in base-install checks.
+- Align the conda recipe with the base pip dependencies and Python 3.10.
+- Load only the required relation CSVs for territorial mappings, reuse cached
+  relations without RSS requests, and load cached geometries before downloads.
 - Collect per-file date and mandatory-field diagnostics in one streaming
   Polars scan instead of separate diagnostic and date scans.
 - Require GeoPandas 1.1.4 or newer in its 1.1 series for the SQL injection fix

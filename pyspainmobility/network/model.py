@@ -430,9 +430,9 @@ class CommunityPartition:
                 dict(self.hierarchy),
                 self.algorithm,
                 self.algorithm_version,
-                dict(self.parameters),
+                _audit_value(self.parameters),
                 self.network_fingerprint,
-                dict(self.algorithm_metrics),
+                _audit_value(self.algorithm_metrics),
             ),
         )
 

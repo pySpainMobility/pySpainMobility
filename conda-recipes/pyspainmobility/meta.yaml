@@ -1,6 +1,6 @@
 {% set name = "pyspainmobility" %}
-{% set version = "2.0.0" %}
-{% set python_min = "3.9" %}
+{% set version = "2.1.0" %}
+{% set python_min = "3.10" %}
 
 
 package:
@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/pyspainmobility-{{ version }}.tar.gz
-  sha256: 31079147031d4f30dffb37ffed049cba7e411df66df64e07a4071808e12ff30f
+  sha256: 2f08fce67698ba533598a89ba6953f1f7d234fb312ca6cf79eac12b09a207e68
 
 build:
   noarch: python
@@ -24,11 +24,11 @@ requirements:
     - wheel
   run:
     - python >={{ python_min }}
-    - geopandas >=1.0.1,<1.1.dev0
+    - geopandas-base >=1.1.4,<1.2
+    - pyogrio >=0.7.2
+    - pyproj >=3.5
+    - pandas >=2.0
     - tqdm >=4.0.0
-    - matplotlib-base >=3.0.0
-    - pyarrow >=8.0.0
-    - dask >=2024.0
     - polars >=1.25,<2
     - scipy >=1.11
 

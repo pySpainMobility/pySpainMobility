@@ -22,7 +22,7 @@ jobs:
       - name: Install package and test runner
         run: python -m pip install -e '.[arrow]' pytest
       - name: Run test suite
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not network_adapter"
 
   optional-network-adapters:
     runs-on: ubuntu-latest
@@ -32,9 +32,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install package with optional network adapters
-        run: python -m pip install -e '.[dev]'
+        run: python -m pip install -e '.[network,infomap]' pytest
       - name: Run network integration tests
-        run: python -m pytest -q tests/test_network.py
+        run: python -m pytest -q tests/test_network.py -m network_adapter
 
   minimal-install:
     runs-on: ubuntu-latest
@@ -45,5 +45,5 @@ jobs:
           python-version: "3.11"
       - name: Install base package and test runner
         run: python -m pip install -e . pytest
-      - name: Test Polars pandas fallback without optional dependencies
-        run: python -m pytest -q tests/test_minimal_install.py
+      - name: Test base features without optional dependencies
+        run: python -m pytest -q tests/test_minimal_install.py tests/test_provinces.py -m minimal_install

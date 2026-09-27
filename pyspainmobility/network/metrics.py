@@ -147,8 +147,10 @@ def _stable_sparse_cosine(left_matrix, right_matrix) -> float:
         return 0.0
     left_scale = float(np.max(left_matrix.data))
     right_scale = float(np.max(right_matrix.data))
-    left_normalized = left_matrix / left_scale
-    right_normalized = right_matrix / right_scale
+    left_normalized = left_matrix.copy()
+    right_normalized = right_matrix.copy()
+    left_normalized.data /= left_scale
+    right_normalized.data /= right_scale
     denominator = float(
         np.sqrt(left_normalized.multiply(left_normalized).sum())
         * np.sqrt(right_normalized.multiply(right_normalized).sum())

@@ -155,6 +155,7 @@ def test_build_network_rejects_incomplete_node_universe():
         build_network(od, node_ids=["A"])
 
 
+@pytest.mark.network_adapter
 def test_networkx_adapter_uses_zone_ids_and_preserves_weights():
     pytest.importorskip("networkx")
     network = build_network(
@@ -172,6 +173,7 @@ def test_networkx_adapter_uses_zone_ids_and_preserves_weights():
     assert np.isclose(sum(data["weight"] for _, _, data in graph.edges(data=True)), 2.5)
 
 
+@pytest.mark.network_adapter
 def test_infomap_adapter_runs_from_csr_and_preserves_node_contract():
     pytest.importorskip("infomap")
     network = build_network(
@@ -217,6 +219,25 @@ def test_infomap_adapter_rejects_a_direction_override():
 
     with pytest.raises(ValueError, match="directed cannot be overridden"):
         run_infomap(network, directed=False)
+
+
+def test_community_partition_pickle_preserves_nested_audit_data():
+    partition = CommunityPartition(
+        node_index=NodeIndex(["A"]),
+        assignments={"A": 1},
+        hierarchy={"A": (1, 2)},
+        algorithm="custom",
+        algorithm_version=None,
+        parameters={"nested": {"seed": 3, "values": [1, 2]}},
+        network_fingerprint="fingerprint",
+        algorithm_metrics={"nested": {"score": 0.5}},
+    )
+    restored = pickle.loads(pickle.dumps(partition))
+    assert restored == partition
+    with pytest.raises(TypeError):
+        restored.parameters["nested"]["seed"] = 4
+    with pytest.raises(TypeError):
+        restored.algorithm_metrics["nested"]["score"] = 1.0
 
 
 def test_symmetrize_network_makes_undirected_rules_and_accounting_explicit():
@@ -268,6 +289,7 @@ def test_symmetrize_network_makes_undirected_rules_and_accounting_explicit():
         compare_networks(directed, summed)
 
 
+@pytest.mark.network_adapter
 def test_networkx_adapter_preserves_an_undirected_network_contract():
     pytest.importorskip("networkx")
     directed = build_network(
@@ -1275,7 +1297,7 @@ def test_temporal_configuration_cannot_diverge_from_its_snapshot_cache():
         temporal.max_cached_snapshots = 0
 
 
-@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e-309, 1e-310, 1e200])
 def test_cosine_is_invariant_to_positive_weight_scale(scale):
     network = build_network(
         pl.DataFrame(
@@ -1293,16 +1315,17 @@ def test_cosine_is_invariant_to_positive_weight_scale(scale):
     ).to_list() == pytest.approx([1.0, 1.0, 1.0])
 
 
-def test_tiny_disjoint_destination_profiles_are_not_treated_as_empty():
+@pytest.mark.parametrize("scale", [1e-200, 1e-310])
+def test_tiny_disjoint_destination_profiles_are_not_treated_as_empty(scale):
     left = build_network(
         pl.DataFrame(
-            {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1e-200]}
+            {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [scale]}
         ),
         node_ids=["A", "B", "C"],
     )
     right = build_network(
         pl.DataFrame(
-            {"id_origin": ["A"], "id_destination": ["C"], "n_trips": [1e-200]}
+            {"id_origin": ["A"], "id_destination": ["C"], "n_trips": [scale]}
         ),
         node_ids=["A", "B", "C"],
     )
@@ -1471,13 +1494,3 @@ def test_node_index_rejects_nested_identifiers_before_string_conversion():
     )
     with pytest.raises(ValueError, match="one-dimensional"):
         build_network(od, node_ids=nested)
-
-
-def test_destination_cosine_handles_subnormal_positive_weights():
-    network = build_network(
-        pl.DataFrame(
-            {"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1e-309]}
-        )
-    )
-    similarity = destination_similarity(network, network)
-    assert similarity["destination_cosine_similarity"].to_list() == [1.0, 1.0]

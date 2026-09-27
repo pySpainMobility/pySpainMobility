@@ -8,7 +8,12 @@ from shapely.geometry import Point
 
 import pyspainmobility.mobility.mobility as mobility_module
 from pyspainmobility.mobility.mobility import Mobility
-from pyspainmobility.network import aggregate_network, build_network
+from pyspainmobility import select_od
+from pyspainmobility.network import (
+    aggregate_network,
+    aggregate_od_network,
+    build_network,
+)
 from pyspainmobility.utils import utils
 from pyspainmobility.zones.zones import Zones
 
@@ -300,7 +305,7 @@ def test_get_zone_relations_uses_output_path_for_version2(monkeypatch, tmp_path)
     assert {"seccion_ine", "distrito_ine", "municipio_ine", "municipio_mitma", "distrito_mitma", "gau_mitma"}.isdisjoint(
         df.columns
     )
-    assert calls["available"] == 1
+    assert calls["available"] == 0
     assert calls["download"] == 0
 
 
@@ -730,6 +735,116 @@ def test_get_od_data_keeps_activity_and_social_dimensions(monkeypatch, tmp_path)
     assert set(df["gender"]) == {"male", "female"}
 
 
+@pytest.mark.parametrize("backend", ["pandas", "arrow", "polars", "dask_fallback"])
+def test_explicit_od_dimensions_and_lazy_selection(monkeypatch, tmp_path, backend):
+    mobility = (
+        _build_mobility_dask(monkeypatch, tmp_path)
+        if backend == "dask_fallback"
+        else _build_mobility(monkeypatch, tmp_path, backend=backend)
+    )
+    monkeypatch.setattr(mobility, "_saving_parquet", Mobility._saving_parquet.__get__(mobility))
+    file_path = tmp_path / "od_dimensions.csv.gz"
+    _write_gzip(
+        file_path,
+        "fecha|periodo|origen|destino|residencia|distancia|renta|viajes|viajes_km\n"
+        "20220101|08|01001|01009|01|1|low|2|5\n"
+        "20220101|08|01001|01009|01|1|high|3|9\n"
+        "20220101|09|01001|01009|01|2| NA |4|12\n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+
+    result = mobility.get_od_data(
+        dimensions=["income", "residence_province_ine_code", "distance"],
+        return_df=True,
+    )
+    assert result["n_trips"].sum() == 9
+    assert set(result["residence_province_ine_code"]) == {"01"}
+    assert set(result["distance"]) == {"1", "2"}
+    assert result["income"].isna().sum() == 1
+    assert select_od(
+        result, filters={"income": "high"}, group_by=[]
+    ).collect()["n_trips"].to_list() == [3]
+
+    output = next((tmp_path / "custom_out").glob("*_dims_*.parquet"))
+    selected = select_od(
+        output,
+        filters={"income": "low", "hour": 8},
+        group_by=["id_origin", "id_destination"],
+    ).collect()
+    assert selected["n_trips"].to_list() == [2]
+    assert selected["trips_total_length_km"].to_list() == [5]
+    assert select_od(output, filters={"income": None}).collect()["n_trips"].to_list() == [4]
+
+
+def test_explicit_od_dimensions_reject_missing_or_conflicting_fields(monkeypatch, tmp_path):
+    mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
+    file_path = tmp_path / "od_missing_dimension.csv.gz"
+    _write_gzip(
+        file_path,
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20220101|08|A|B|2|5\n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+    with pytest.raises(ValueError, match="missing.*gender.*sexo"):
+        mobility.get_od_data(dimensions=["gender"])
+    with pytest.raises(ValueError, match="cannot be combined"):
+        mobility.get_od_data(dimensions=["age"], social_agg=True)
+    with pytest.raises(ValueError, match="Unknown OD dimensions"):
+        mobility.get_od_data(dimensions=["unknown"])
+
+
+@pytest.mark.parametrize("allow_partial", [False, True])
+def test_missing_requested_dimension_reports_exact_day(monkeypatch, tmp_path, allow_partial):
+    mobility = _build_mobility(monkeypatch, tmp_path, end_date="2022-01-02")
+    monkeypatch.setattr(
+        mobility, "_saving_parquet", lambda *_, **__: pytest.fail("result was saved")
+    )
+
+    def fake_download(_url, path):
+        second_day = "20220102" in path
+        day = "20220102" if second_day else "20220101"
+        gender_header = "" if second_day else "|sexo"
+        gender_value = "" if second_day else "|hombre"
+        _write_gzip(
+            Path(path),
+            f"fecha|periodo|origen|destino|viajes|viajes_km{gender_header}\n"
+            f"{day}|08|A|B|2|5{gender_value}\n",
+        )
+
+    monkeypatch.setattr(utils, "download_file_if_not_existing", fake_download)
+    with pytest.raises(ValueError, match="date 2022-01-02.*gender.*sexo"):
+        mobility.get_od_data(dimensions=["gender"], allow_partial=allow_partial)
+
+
+def test_explicit_version1_residence_and_distance(monkeypatch, tmp_path):
+    mobility = _build_mobility(
+        monkeypatch, tmp_path, backend="polars", version=1, zones="districts"
+    )
+    file_path = tmp_path / "od_v1_dimensions.txt.gz"
+    _write_gzip(
+        file_path,
+        "fecha|periodo|origen|destino|residencia|distancia|viajes|viajes_km\n"
+        "20200311|08|A|B|01|2|2|5\n",
+    )
+    monkeypatch.setattr(mobility, "_donwload_helper", lambda *_: [str(file_path)])
+    result = mobility.get_od_data(
+        dimensions=["residence_province_ine_code", "distance"], return_df=True
+    )
+    assert result.loc[0, "residence_province_ine_code"] == "01"
+    assert result.loc[0, "distance"] == "2"
+
+
+def test_select_od_rejects_mixed_output_directory_and_non_od_file(tmp_path):
+    overnight = tmp_path / "Pernoctaciones.parquet"
+    mobility_module.pl.DataFrame({"date": ["2022-01-01"], "people": [3]}).write_parquet(
+        overnight
+    )
+    with pytest.raises(ValueError, match="point to a Parquet file"):
+        select_od(tmp_path)
+    with pytest.raises(ValueError, match="OD measures are unavailable"):
+        select_od(overnight)
+
+
 def test_polars_processes_multiple_od_files_in_one_result(monkeypatch, tmp_path):
     mobility = _build_mobility(monkeypatch, tmp_path, backend="polars")
     files = []
@@ -999,7 +1114,7 @@ def test_other_daily_outputs_reject_missing_downloads(
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 @pytest.mark.parametrize(
-    "invalid_case", ["negative", "non_finite", "missing", "extra_field", "wrong_date"]
+    "invalid_case", ["negative", "non_finite", "missing", "extra_field", "wrong_date", "date_suffix"]
 )
 @pytest.mark.parametrize(
     "method_name,header,good_template,invalid_template,m_type",
@@ -1046,6 +1161,8 @@ def test_tabular_source_failure_never_publishes_a_complete_period(
                 invalid = "|".join(fields)
             elif invalid_case == "extra_field":
                 invalid += "|extra"
+            elif invalid_case == "date_suffix":
+                invalid = invalid.replace(day, day + "junk", 1)
             else:
                 invalid = invalid.replace(day, "20220103", 1)
             content += invalid + "\n"
@@ -1523,36 +1640,117 @@ def test_get_network_mapping_rejects_ambiguous_or_incomplete_relations(monkeypat
             }
         ),
     )
-    with pytest.raises(ValueError, match="not one-to-one"):
+    with pytest.raises(ValueError, match="multiple targets"):
         zones.get_network_mapping("districts_mitma", "municipalities")
 
 
-def test_get_province_mapping_derives_ine_province_and_validates_codes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("invalid_code", ["not-an-ine-code", "00000", "53001", "99999"])
+def test_get_province_mapping_derives_ine_province_and_validates_codes(monkeypatch, tmp_path, invalid_code):
     zones = Zones(zones="districts", version=2, output_directory=str(tmp_path))
     monkeypatch.setattr(
         zones,
         "get_zone_relations",
         lambda: pd.DataFrame(
             {
-                "districts_mitma": ["D1", "D2"],
-                "municipalities": ["28079", "08001"],
+                "districts_mitma": ["D1", "D2", "D3", "D4"],
+                "municipalities": ["28079", "08001", "51001", "52001"],
             }
         ),
     )
-    mapping = zones.get_province_mapping(source_ids=["D1", "D2"])
+    mapping = zones.get_province_mapping(source_ids=["D1", "D2", "D3", "D4"])
     assert mapping.to_dict("records") == [
         {"source_id": "D1", "target_id": "28"},
         {"source_id": "D2", "target_id": "08"},
+        {"source_id": "D3", "target_id": "51"},
+        {"source_id": "D4", "target_id": "52"},
     ]
 
     monkeypatch.setattr(
         zones,
         "get_zone_relations",
         lambda: pd.DataFrame(
-            {"districts_mitma": ["D1"], "municipalities": ["not-an-ine-code"]}
+            {"districts_mitma": ["D1"], "municipalities": [invalid_code]}
         ),
     )
     with pytest.raises(ValueError, match="five-digit INE"):
+        zones.get_province_mapping()
+
+
+@pytest.mark.parametrize(
+    "level,source_column",
+    [
+        ("districts", "districts_mitma"),
+        ("municipalities", "municipalities_mitma"),
+        ("large_urban_areas", "luas_mitma"),
+    ],
+)
+def test_province_mapping_accepts_grouped_zones_at_selected_level(
+    monkeypatch, tmp_path, level, source_column
+):
+    zones = Zones(zones=level, version=2, output_directory=str(tmp_path))
+    relations = pd.DataFrame(
+        {
+            source_column: ["G", "G", "G", "B", "cross", "cross", "invalid"],
+            "municipalities": [
+                "28079", "28080", "28079", "08001", "28079", "08001", None
+            ],
+        }
+    )
+    monkeypatch.setattr(zones, "get_zone_relations", lambda: relations)
+    mapping = zones.get_province_mapping(source_ids=["G", "B"])
+    assert mapping.to_dict("records") == [
+        {"source_id": "B", "target_id": "08"},
+        {"source_id": "G", "target_id": "28"},
+    ]
+    with pytest.raises(ValueError, match="multiple targets.*province.*cross"):
+        zones.get_province_mapping(source_ids=["cross"])
+    with pytest.raises(ValueError, match="invalid relations.*invalid"):
+        zones.get_province_mapping(source_ids=["invalid"])
+    with pytest.raises(ValueError, match="No relation mapping.*absent"):
+        zones.get_province_mapping(source_ids=["absent"])
+    assert zones.get_province_mapping(source_ids=[]).empty
+
+
+@pytest.mark.parametrize("level", ["districts", "municipalities"])
+def test_province_mapping_version1_uses_real_relation_sets(
+    monkeypatch, tmp_path, level
+):
+    (tmp_path / "relaciones_municipio_mitma.csv").write_text(
+        "municipio|municipio_mitma\n28079|M1\n28080|M1\n08001|M2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "relaciones_distrito_mitma.csv").write_text(
+        "distrito|distrito_mitma|municipio_mitma\n"
+        "2807901|D1|M1\n2807902|D2|M1\n0800101|D3|M2\n",
+        encoding="utf-8",
+    )
+    zones = Zones(zones=level, version=1, output_directory=str(tmp_path))
+    monkeypatch.setattr(zones, "_ensure_zoning_files_downloaded", lambda *args, **kwargs: None)
+    mapping = zones.get_province_mapping()
+    expected = (
+        {"D1": "28", "D2": "28", "D3": "08"}
+        if level == "districts" else {"M1": "28", "M2": "08"}
+    )
+    assert dict(zip(mapping["source_id"], mapping["target_id"])) == expected
+
+
+@pytest.mark.parametrize(
+    "municipalities", [{"28079", "08001"}, set(), {"28079", None}]
+)
+def test_province_mapping_version1_rejects_ambiguous_or_incomplete_sets(
+    monkeypatch, tmp_path, municipalities
+):
+    zones = Zones(zones="municipalities", version=1, output_directory=str(tmp_path))
+    monkeypatch.setattr(
+        zones,
+        "get_zone_relations",
+        lambda: pd.DataFrame(
+            {"municipalities": [municipalities]}, index=pd.Index(["G"], name="id")
+        ),
+    )
+    with pytest.raises(
+        ValueError, match="(multiple targets.*province.*G|invalid relations.*G)"
+    ):
         zones.get_province_mapping()
 
 
@@ -1565,25 +1763,29 @@ def test_province_mapping_integrates_with_network_and_drops_internalized_flows(
         "get_zone_relations",
         lambda: pd.DataFrame(
             {
-                "districts_mitma": ["D1", "D2", "D3"],
-                "municipalities": ["28079", "28080", "08001"],
+                "districts_mitma": ["D1", "D1", "D2", "D3"],
+                "municipalities": ["28079", "28080", "28080", "08001"],
             }
         ),
     )
-    district_network = build_network(
-        pd.DataFrame(
-            {
-                "id_origin": ["D1", "D2"],
-                "id_destination": ["D2", "D3"],
-                "n_trips": [4.0, 7.0],
-            }
-        )
+    od = pd.DataFrame(
+        {
+            "id_origin": ["D1", "D2"],
+            "id_destination": ["D2", "D3"],
+            "n_trips": [4.0, 7.0],
+        }
     )
+    district_network = build_network(od)
+    mapping = zones.get_province_mapping(source_ids=district_network.node_ids)
 
     province_network = aggregate_network(
-        district_network,
-        zones.get_province_mapping(source_ids=district_network.node_ids),
-        self_loops="drop",
+        district_network, mapping, self_loops="drop",
+    )
+    provincial_od = aggregate_od_network(od, mapping)
+    assert provincial_od.total_weight == pytest.approx(11.0)
+    assert provincial_od.adjacency.diagonal().sum() == pytest.approx(4.0)
+    assert aggregate_od_network(od, mapping, self_loops="drop").to_edge_table().equals(
+        province_network.to_edge_table()
     )
 
     assert province_network.node_ids.tolist() == ["08", "28"]
@@ -1748,7 +1950,7 @@ def test_network_mapping_validates_only_requested_source_ids():
     ).to_dict("records") == [{"source_id": "A", "target_id": "X"}]
     with pytest.raises(ValueError, match="without a target"):
         zones.get_network_mapping("source", "target")
-    with pytest.raises(ValueError, match="not one-to-one"):
+    with pytest.raises(ValueError, match="multiple targets"):
         zones.get_network_mapping("source", "target", source_ids=["C"])
 
 
@@ -1809,6 +2011,8 @@ def test_trip_count_optional_demographic_markers_are_missing(
     "invalid_row",
     [
         "20240230|12|A|B|3|4",
+        "20240229junk|12|A|B|3|4",
+        "202402291|12|A|B|3|4",
         "20240229|bad|A|B|3|4",
         "20240229|24|A|B|3|4",
     ],
@@ -1849,3 +2053,17 @@ def test_od_drops_invalid_calendar_dates_and_hours_and_fails_manifest(
     assert mobility.get_acquisition_manifest("Viajes")["parse_status"].tolist() == [
         "failed"
     ]
+
+
+def test_source_date_parsers_require_a_complete_date_in_both_backends():
+    values = [
+        "20240229", "2024-02-29", "2024/02/29", " 20240229.0 ",
+        "20240230", "20240229junk", "202402291", "2024-02-29T12:30", None,
+    ]
+    expected = ["2024-02-29"] * 4 + [None] * 5
+    pandas_dates = Mobility._normalize_date_series(pd.Series(values))
+    assert pandas_dates.astype(object).where(pandas_dates.notna(), None).tolist() == expected
+    polars_dates = mobility_module.pl.DataFrame({"date": values}).select(
+        Mobility._polars_date("date")
+    ).to_series().to_list()
+    assert polars_dates == expected

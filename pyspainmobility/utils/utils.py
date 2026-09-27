@@ -3,7 +3,6 @@ import os
 import pandas as pd
 import xml.etree.ElementTree as ET
 import re
-from urllib.request import urlopen
 import zipfile
 import gzip
 import json
@@ -11,10 +10,11 @@ import tempfile
 from datetime import date as calendar_date
 from numbers import Integral
 from os.path import expanduser
-from urllib.request import urlopen, Request      
+from urllib.request import urlopen, Request
 
 
 data_directory = os.path.join(expanduser("~"), 'data')
+_REQUEST_TIMEOUT = 60  # Seconds per blocking socket operation, not per file.
 
 def available_mobility_data(version: int = 2) -> pd.DataFrame:
     version_assert(version)
@@ -28,7 +28,7 @@ def available_mobility_data(version: int = 2) -> pd.DataFrame:
 
     data = []
 
-    with urlopen(url) as f:
+    with urlopen(url, timeout=_REQUEST_TIMEOUT) as f:
         tree = ET.parse(f)
         for item in tree.getroot()[0].findall('item'):
             title = str(item.findtext('title')).strip()
@@ -92,6 +92,8 @@ def available_zoning_data(version: int = 2, zone: str = None) -> pd.DataFrame:
     if zone is not None:
         zone_assert(zone, version)
         normalized_zone = zone_normalization(zone)
+        if normalized_zone == "provinces":
+            normalized_zone = "distritos"
 
     url = None
 
@@ -120,7 +122,7 @@ def available_zoning_data(version: int = 2, zone: str = None) -> pd.DataFrame:
             rf"(nombres_{normalized_zone}\..*)"
         )
 
-    with urlopen(url) as f:
+    with urlopen(url, timeout=_REQUEST_TIMEOUT) as f:
         tree = ET.parse(f)
         # link, file_extension, data_ym, data_ymd, local_path, downloaded
         for item in tree.getroot()[0].findall('item'):
@@ -139,13 +141,14 @@ def zone_assert(zone: str = None, version: int = 2) -> None:
     allowed_zones = [
         "districts", "dist", "distr", "distritos",
         "municipalities", "muni", "municip", "municipal", "municipios",
-        "lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas"
+        "lua", "large_urban_areas", "gau", "gaus", "grandes_areas_urbanas",
+        "province", "provinces", "provincia", "provincias",
     ]
     if normalized_zone not in allowed_zones:
         raise ValueError(
             "zone must be one of the following: districts, dist, distr, distritos, "
             "municipalities, muni, municipal, municipios, lua, large_urban_areas, "
-            "gau, gaus, grandes_areas_urbanas"
+            "gau, gaus, grandes_areas_urbanas, provinces"
         )
 
     if version == 1:
@@ -195,6 +198,10 @@ def zone_normalization(zone: str = None) -> str:
         'gau': 'gaus',
         'gaus': 'gaus',
         'grandes_areas_urbanas': 'gaus',
+        'province': 'provinces',
+        'provinces': 'provinces',
+        'provincia': 'provinces',
+        'provincias': 'provinces',
     }
     return mapping[normalized_zone] if normalized_zone in mapping else normalized_zone
 
@@ -326,7 +333,7 @@ def download_file_if_not_existing(
     try:
         print(f"Downloading: {url}")
         req = Request(url, headers={"User-Agent": "Mozilla/5.0"})   # header
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
             if resp.status != 200:
                 raise Exception(f"HTTP {resp.status}")
             with tempfile.NamedTemporaryFile(
@@ -358,6 +365,22 @@ def download_file_if_not_existing(
         if temporary_path is not None and os.path.exists(temporary_path):
             os.remove(temporary_path)
         raise
+
+def write_json_atomic(value, path: str) -> None:
+    """Replace a JSON audit record only after its complete serialization."""
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=os.path.dirname(path) or ".",
+            prefix=".pyspainmobility-", suffix=".json", delete=False,
+        ) as stream:
+            temporary_path = stream.name
+            json.dump(value, stream, ensure_ascii=False, allow_nan=False, indent=2)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
 
 def get_dates_between(start_date: str, end_date: str) -> list:
     """

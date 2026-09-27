@@ -16,6 +16,9 @@ class Zones:
         ----------
         zones : str
             The zones to download the data for. Default is municipalities. Zones must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas
+            ``provinces`` dissolves mapped district geometries, excluding zones
+            without a unique province. These are derived MITMA geometries;
+            exclusions and geometry repairs are recorded in result ``attrs``.
         version : int
             The version of the data to download. Default is 2. Version must be 1 or 2. Version 1 contains the data from 2020 to 2021. Version 2 contains the data from 2022 onwards.
         output_directory : str
@@ -43,6 +46,7 @@ class Zones:
         utils.zone_assert(zones, version)
         self.version = version
         self.zones = utils.zone_normalization(zones)
+        self.source_zones = "distritos" if self.zones == "provinces" else self.zones
         self.complete_df = None
         self._zoning_links = None
         self._downloads_ready = False
@@ -78,23 +82,31 @@ class Zones:
         """
         if self._zoning_links is None:
             self._zoning_links = (
-                utils.available_zoning_data(self.version, self.zones)["link"]
+                utils.available_zoning_data(self.version, getattr(self, "source_zones", self.zones))["link"]
                 .dropna()
                 .unique()
                 .tolist()
             )
         return self._zoning_links
 
-    def _ensure_zoning_files_downloaded(self) -> None:
+    def _ensure_zoning_files_downloaded(self, required=None) -> None:
         """
         Download required files only when the user first requests data.
         """
         if self._downloads_ready:
             return
+        if required and all(
+            os.path.isfile(self._resolve_data_file(name))
+            and os.path.getsize(self._resolve_data_file(name)) > 0
+            for name in required
+        ):
+            return
 
         links = self._get_zoning_links()
         for link in links:
             file_name = link.split("/")[-1]
+            if required is not None and file_name not in required:
+                continue
             local_path = os.path.join(self.output_path, file_name)
 
             if (
@@ -108,7 +120,8 @@ class Zones:
             if self.version == 1 and file_name.endswith(".zip"):
                 utils.unzip_file(local_path, self.output_path)
 
-        self._downloads_ready = True
+        if required is None:
+            self._downloads_ready = True
 
     def _load_zone_geodataframe(self) -> None:
         """
@@ -117,8 +130,36 @@ class Zones:
         if self.complete_df is not None:
             return
 
-        self._ensure_zoning_files_downloaded()
-        print("Zones already downloaded. Reading the files....")
+        if self.zones == "provinces":
+            source = Zones(self.source_zones, self.version, self.output_path)
+            frame = source.get_zone_geodataframe()
+            mapping = source.get_province_mapping(source_ids=frame.index, unmapped="exclude")
+            correspondence = dict(zip(mapping["source_id"], mapping["target_id"]))
+            excluded = mapping.attrs["unmapped_source_ids"]
+            retained = frame.loc[frame.index.isin(correspondence), [frame.geometry.name]].copy()
+            retained["id"] = retained.index.map(correspondence)
+            missing_geometry = retained.geometry.isna() | retained.geometry.is_empty
+            if missing_geometry.any():
+                raise ValueError("Mapped source zones lack geometry: %s" % retained.index[missing_geometry].tolist()[:5])
+            invalid_geometry = ~retained.geometry.is_valid
+            if invalid_geometry.any():
+                retained.loc[invalid_geometry, frame.geometry.name] = retained.loc[invalid_geometry].geometry.make_valid()
+            if "population" in frame:
+                retained["population"] = pd.to_numeric(frame.loc[retained.index, "population"], errors="coerce")
+            retained = retained.reset_index(drop=True)
+            self.complete_df = retained.dissolve(
+                by="id", aggfunc=lambda values: values.sum(skipna=False)
+            ) if not retained.empty else retained.set_index("id")
+            self.complete_df.attrs.update(
+                derived=True, source_zones=self.source_zones, output_zones="provinces",
+                unmapped_source_ids=excluded,
+                method="dissolve_mapped_mitma_zones",
+                repaired_source_geometries=int(invalid_geometry.sum()),
+            )
+            if excluded:
+                import warnings
+                warnings.warn("Province geometries exclude %d unmapped source zones; see result.attrs." % len(excluded), RuntimeWarning, stacklevel=2)
+            return
         output_file_path = os.path.join(self.output_path, f"{self.zones}_{self.version}.geojson")
 
         if os.path.exists(output_file_path):
@@ -127,6 +168,9 @@ class Zones:
                 gpd.read_file(output_file_path)
             )
             return
+
+        self._ensure_zoning_files_downloaded()
+        print("Zones already downloaded. Reading the files....")
 
         if self.version == 2:
             def _read_pipe_csv(path, cols):
@@ -325,7 +369,10 @@ class Zones:
         ['census_sections', 'census_districts', 'municipalities',
          'municipalities_mitma', 'districts_mitma', 'luas_mitma']
         """
-        self._ensure_zoning_files_downloaded()
+        self._ensure_zoning_files_downloaded(
+            ["relacion_ine_zonificacionMitma.csv"] if self.version == 2 else
+            ["relaciones_municipio_mitma.csv", "relaciones_distrito_mitma.csv"]
+        )
         if self.version == 2:
             relacion = self._read_relation_table('relacion_ine_zonificacionMitma.csv')
 
@@ -341,7 +388,7 @@ class Zones:
             relacion = relacion.replace('NA', None)
             return relacion
         else:
-            used_zone = self.zones[:-1]
+            used_zone = getattr(self, "source_zones", self.zones)[:-1]
             relacion = self._read_relation_table(f'relaciones_{used_zone}_mitma.csv')
 
             relacion.rename(columns={f'{used_zone}_mitma': 'id'}, inplace=True)
@@ -417,6 +464,16 @@ class Zones:
             :func:`pyspainmobility.network.aggregate_network` and
             :func:`pyspainmobility.network.aggregate_od_network`.
         """
+        mapping = self._relation_pairs(source_column, target_column, source_ids)
+        mapping["target_id"] = mapping["target_id"].map(
+            lambda value: self._normalize_relation_identifier(
+                value, column=target_column
+            )
+        )
+        return self._validate_network_mapping(mapping, target_column)
+
+    def _relation_pairs(self, source_column, target_column, source_ids, *, allow_missing=False):
+        """Select relation pairs and restrict validation to requested sources."""
         relations = self.get_zone_relations()
         if relations.index.name == "id" and "id" not in relations.columns:
             relations = relations.reset_index()
@@ -435,12 +492,6 @@ class Zones:
                 value, column=source_column
             )
         )
-        mapping["target_id"] = mapping["target_id"].map(
-            lambda value: self._normalize_relation_identifier(
-                value, column=target_column
-            )
-        )
-
         # A row without a source cannot describe a source-to-target mapping.
         mapping = mapping.loc[mapping["source_id"].notna()].copy()
         if source_ids is not None:
@@ -457,13 +508,19 @@ class Zones:
             requested = requested.drop_duplicates()
             available = pd.Index(mapping["source_id"])
             absent = requested.difference(available)
-            if not absent.empty:
+            if not absent.empty and not allow_missing:
                 raise ValueError(
                     "No relation mapping is available for source IDs: %s"
                     % absent[:5].tolist()
                 )
             mapping = mapping.loc[mapping["source_id"].isin(requested)]
+            mapping.attrs["unmapped_source_ids"] = absent.tolist()
 
+        return mapping
+
+    @staticmethod
+    def _validate_network_mapping(mapping, target_column):
+        """Require exactly one target per source after target normalization."""
         missing_target = mapping.loc[mapping["target_id"].isna(), "source_id"]
         if not missing_target.empty:
             examples = missing_target.drop_duplicates().head(5).tolist()
@@ -477,7 +534,7 @@ class Zones:
         ambiguous = target_counts.loc[target_counts > 1].index.tolist()
         if ambiguous:
             raise ValueError(
-                "Relation mapping is not one-to-one: source IDs map to multiple "
+                "Relation mapping is ambiguous: source IDs map to multiple "
                 "targets in '%s': %s" % (target_column, ambiguous[:5])
             )
 
@@ -485,9 +542,11 @@ class Zones:
 
     def get_province_mapping(
         self,
-        source_column: str = "districts_mitma",
+        source_column: Optional[str] = None,
         municipality_column: str = "municipalities",
         source_ids=None,
+        *,
+        unmapped: str = "raise",
     ) -> pd.DataFrame:
         """Map MITMA zones to Spanish provinces through INE municipality IDs.
 
@@ -497,23 +556,57 @@ class Zones:
         validated ``source_id``/``target_id`` mapping, where ``target_id`` is
         the two-digit INE province code.
 
-        By default it maps MITMA districts, the level used by the mobility OD
-        data.  As with :meth:`get_network_mapping`, ambiguous district-to-
-        municipality relations raise instead of selecting a first match.
+        By default, the source column matches this object's selected zoning
+        level (``id`` for version 1). A zone may contain several municipalities
+        when all belong to the same province. Missing or invalid municipality
+        codes and zones spanning multiple provinces raise instead of splitting
+        their flow. Version-1 sets of municipality IDs are supported.
+        Code validation checks the five-digit format and province prefix 01–52,
+        not historical municipality registry membership.
+        ``unmapped='exclude'`` omits entire sources with absent, invalid, or
+        ambiguous relations and lists them in ``attrs['unmapped_source_ids']``.
+        The default ``unmapped='raise'`` retains strict mapping validation.
+        For ``Zones(zones='provinces')`` this maps the underlying district IDs.
         """
-        mapping = self.get_network_mapping(
-            source_column=source_column,
-            target_column=municipality_column,
-            source_ids=source_ids,
-        )
-        valid_municipalities = mapping["target_id"].str.fullmatch(r"\d{5}")
-        if not valid_municipalities.all():
-            examples = mapping.loc[~valid_municipalities, "target_id"].head(5).tolist()
-            raise ValueError(
-                "Cannot derive province codes: '%s' must contain five-digit INE "
-                "municipality identifiers; invalid values: %s"
-                % (municipality_column, examples)
+        if unmapped not in {"raise", "exclude"}:
+            raise ValueError("unmapped must be 'raise' or 'exclude'.")
+        if source_column is None:
+            source_column = "id" if self.version == 1 else {
+                "distritos": "districts_mitma",
+                "municipios": "municipalities_mitma",
+                "gaus": "luas_mitma",
+            }[getattr(self, "source_zones", self.zones)]
+        mapping = self._relation_pairs(
+            source_column, municipality_column, source_ids,
+            allow_missing=unmapped == "exclude",
+        ).explode("target_id", ignore_index=True)
+        excluded = set(mapping.attrs.get("unmapped_source_ids", []))
+        municipalities = mapping["target_id"].map(
+            lambda value: self._normalize_relation_identifier(
+                value, column=municipality_column
             )
-        result = mapping.copy()
-        result["target_id"] = result["target_id"].str[:2]
-        return result
+        ).astype("string")
+        provinces = municipalities.str[:2]
+        valid_municipalities = (
+            municipalities.str.fullmatch(r"[0-9]{5}").fillna(False)
+            & provinces.isin([f"{code:02d}" for code in range(1, 53)])
+        )
+        if not valid_municipalities.all():
+            examples = mapping.loc[
+                ~valid_municipalities, ["source_id", "target_id"]
+            ].head(5).to_dict("records")
+            if unmapped == "raise":
+                raise ValueError(
+                    "Cannot derive province codes: '%s' must contain five-digit INE "
+                    "municipality identifiers with province codes 01–52; invalid relations: %s"
+                    % (municipality_column, examples)
+                )
+            excluded.update(mapping.loc[~valid_municipalities, "source_id"])
+        mapping["target_id"] = provinces
+        if unmapped == "exclude":
+            counts = mapping.groupby("source_id")["target_id"].nunique()
+            excluded.update(counts.index[counts > 1])
+            mapping = mapping.loc[~mapping["source_id"].isin(excluded)]
+        mapping = self._validate_network_mapping(mapping, "province")
+        mapping.attrs["unmapped_source_ids"] = sorted(excluded)
+        return mapping

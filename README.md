@@ -27,12 +27,11 @@ The documentation of `pySpainMobility` classes and functions is available at [py
 
 <a id='installation'></a>
 ## Installation
-`pySpainMobility` can be installed with `pip` or `conda`. The next release
-will require Python >= 3.10. The published 2.0.0 package still uses the older
-GeoPandas requirement; the security update needs a new package release.
+`pySpainMobility` can be installed with `pip` or `conda`. Version 2.1.0 requires
+Python >= 3.10 and includes the patched GeoPandas dependency.
 
 <a id='installation_pip'></a>
-### installation with pip (python >= 3.10 required for the next release)
+### installation with pip (Python >= 3.10)
 
 1. Create an environment `venv`
 
@@ -91,6 +90,12 @@ are not included in the pip package.
 
 Run the local tests with `python -m pytest -q`. Live MITMA tests are disabled
 by default and can be enabled with `PYSPAINMOBILITY_RUN_LIVE_TESTS=1`.
+Tests are grouped by domain: mobility/zones, networks, provincial products and
+utilities. Parametrization checks the same contract across backends and source
+versions. CI runs the core suite on Python 3.10–3.12, optional adapters once on
+Python 3.11, and base-install checks in an environment without optional extras.
+Use `python -m pytest -q -m network_adapter` or
+`python -m pytest -q -m minimal_install` to select those groups locally.
 Release history is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Backend Selection
@@ -150,6 +155,40 @@ both dimensions retained. Parquet output is written through a temporary file
 and then moved into place, so an interrupted write does not leave a partly
 written result at the final filename.
 
+### Selecting OD dimensions and flows
+
+Pass `dimensions` to retain only the optional categories needed for an
+analysis. Supported names are `activity_origin`, `activity_destination`,
+`residence_province_ine_code`, `distance`, `income`, `age`, and `gender`.
+Requested categories become aggregation keys; missing category values keep
+their flows. `distance` is the source's distance category, not kilometres.
+The existing `keep_activity` and `social_agg` flags remain valid,
+but cannot be combined with `dimensions`.
+If a requested column is absent from a source file, processing raises a
+`ValueError` naming the exact day and dimension, even with `allow_partial=True`.
+Adjust the requested dates or dimensions before retrying.
+
+```python
+od = mobility.get_od_data(
+    dimensions=["income", "residence_province_ine_code"], return_df=True
+)
+
+from pyspainmobility import select_od
+
+flows = select_od(
+    od,
+    filters={"income": "10-15", "hour": [8, 9]},
+    group_by=["id_origin", "id_destination"],
+).collect()
+```
+
+`select_od()` accepts the saved Parquet path directly for lazy, memory-efficient
+scanning. Filters match exact values; `None` selects a missing category.
+`group_by` sums both `n_trips` and `trips_total_length_km`. With no `group_by`,
+the selected rows remain at their original granularity. Filtering happens
+after source validation, so an empty subset does not turn a valid source day
+into a reported download failure.
+
 ### Building sparse mobility networks
 
 `pyspainmobility.network` turns a processed OD table into a directed, weighted
@@ -204,8 +243,8 @@ is an error, not an implicit comparison.
 
 For NetworkX algorithms or visualization, install `pyspainmobility[network]`
 and use `pyspainmobility.network.integrations.to_networkx(network)`. The CSR
-representation remains the canonical format, so future adapters such as
-Infomap do not require a NetworkX conversion.
+representation remains the canonical format; the Infomap adapter consumes
+it directly without a NetworkX conversion.
 
 For community detection with Infomap, install `pyspainmobility[infomap]` and
 run the adapter directly on that CSR matrix:
@@ -349,11 +388,19 @@ self-loops explicitly discarded with `self_loops="drop"`; neither is silently
 lost. Provenance history also retains the accounting from initial network
 construction, including source self-loops dropped before later transformations.
 
-For an official, validated district-to-province correspondence, obtain the
-mapping from `Zones`. Province geometries are not a native zoning level: the
+To derive a validated province mapping from official MITMA relations, use
+`Zones`. Province geometries are not a native zoning level: the
 helper derives the two-digit INE province code from the five-digit INE
 municipality code and rejects ambiguous territorial relations rather than
 arbitrarily choosing one.
+`get_province_mapping()` selects the source IDs for the object's zoning level
+and supports versions 1 and 2. A zone containing several municipalities is
+accepted when all belong to the same province. Missing or invalid municipality
+codes and zones spanning multiple provinces raise an error identifying the
+affected source IDs. Pass `source_ids` to validate only the zones in your data.
+Code validation checks the five-digit format and the
+[INE province prefixes 01–52](https://www.ine.es/daco/daco42/codmun/cod_ccaa_provincia.htm),
+including Ceuta and Melilla; it does not check historical municipality registries.
 
 ```python
 from pyspainmobility import Zones
@@ -370,6 +417,50 @@ Use `self_loops="drop"` when the research question is explicitly
 *inter-province* mobility: flows between distinct districts in the same
 province become loops only after this aggregation.
 
+
+### Derived provincial products
+
+Use `zones="provinces"` with `Mobility` to derive province-level OD,
+overnight-stay and trip-count products from MITMA district sources:
+
+```python
+mobility = Mobility(version=2, zones="provinces", start_date="2024-01-01")
+od = mobility.get_od_data(return_df=True, dimensions=["age", "gender"])
+print(mobility.get_acquisition_manifest("Viajes"))
+print(od.attrs["spatial"])
+```
+
+Province IDs are two-digit INE codes, including `51` (Ceuta) and `52` (Melilla).
+Hours, dates, selected dimensions, missing category values and intra-province
+flows are retained. Trips and original trip-kilometres are summed; distances
+are not recalculated from province centroids. Trip-count distributions retain
+each `number_of_trips` category and sum its people counts across districts.
+Version 1 supports OD and trip counts; overnight stays remain unavailable.
+
+Zones without a unique province, including foreign zones and incomplete
+territorial relations, are **explicitly excluded**. An OD/overnight row is
+excluded when either geographic endpoint is unmappable. A warning is emitted;
+the returned DataFrame `attrs`, per-day acquisition manifest and adjacent
+`*.parquet.provenance.json` report excluded rows and trips/kilometres or people.
+The row counts describe processed source rows, after the existing OD grouping.
+Failed source days remain governed separately by `allow_partial`.
+
+Output filenames contain `provinces_derived`. Raw downloads retain district
+filenames and can be reused by district-level analyses. The transformation
+uses existing dependencies and tabular mapping/aggregation without a graph
+or fine-resolution matrix intermediate.
+
+`Zones(zones="provinces", version=2).get_zone_geodataframe()` dissolves mapped
+district geometries. Its string `id` index contains province codes, its CRS is
+preserved, and population is summed when available (missing population stays
+unknown). Unmapped zones and geometry repairs are reported in `attrs`.
+These derived boundaries exclude unmappable territories and are **not an
+official province-boundary dataset**. The dissolved result is cached on the
+`Zones` instance.
+
+The lower-level `get_province_mapping()` remains strict by default. Pass
+`unmapped="exclude"` to obtain only exact mappings and inspect
+`mapping.attrs["unmapped_source_ids"]` for excluded source IDs.
 
 ### Working with R?
 

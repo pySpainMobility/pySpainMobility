@@ -3,8 +3,9 @@ import gzip
 import os
 import tempfile
 import warnings
+from copy import deepcopy
 from os.path import expanduser
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,27 @@ _ACTIVITY_TRANSLATIONS = {
     "otros": "other",
 }
 
+_OD_DIMENSIONS = {
+    "activity_origin": "actividad_origen",
+    "activity_destination": "actividad_destino",
+    "residence_province_ine_code": "residencia",
+    "distance": "distancia",
+    "income": "renta",
+    "age": "edad",
+    "gender": "sexo",
+}
+
+
+def _selected_od_dimensions(keep_activity, social_agg, dimensions):
+    if dimensions is not None:
+        return dimensions
+    selected = []
+    if keep_activity:
+        selected.extend(("activity_origin", "activity_destination"))
+    if social_agg:
+        selected.extend(("income", "age", "gender"))
+    return tuple(selected)
+
 
 class Mobility:
     """
@@ -61,6 +83,8 @@ class Mobility:
         The version of the data to download. Default is 2. Version must be 1 or 2. Version 1 contains the data from 2020 to 2021. Version 2 contains the data from 2022 onwards.
     zones : str
         The zones to download the data for. Default is municipalities. Zones must be one of the following: districts, dist, distr, distritos, municipalities, muni, municipal, municipios, lua, large_urban_areas, gau, gaus, grandes_areas_urbanas
+        ``provinces`` derives provincial products by summing district data.
+        Unmappable zones are excluded explicitly and their counts are reported.
     start_date : str
         The start date of the data to download. Date must be in the format YYYY-MM-DD. A start date is required
     end_date : str
@@ -162,6 +186,8 @@ class Mobility:
             )
 
         self.zones = utils.zone_normalization(zones)
+        self.source_zones = "distritos" if self.zones == "provinces" else self.zones
+        self._province_zones = None
 
         data_directory = utils.get_data_directory()
 
@@ -214,6 +240,7 @@ class Mobility:
         if self.version == 2:
             if self.zones == 'gaus':
                 self.zones = 'GAU'
+                self.source_zones = 'GAU'
 
     def _read_pipe_file(self, filepath: str, dtype: dict = None) -> pd.DataFrame:
         """
@@ -399,16 +426,8 @@ class Mobility:
         normalized = normalized.str.replace("-", "", regex=False)
         normalized = normalized.str.replace("/", "", regex=False)
         normalized = normalized.str.replace(" ", "", regex=False)
-        normalized = normalized.str.zfill(8)
-        formatted = (
-            normalized.str.slice(0, 4)
-            + "-"
-            + normalized.str.slice(4, 6)
-            + "-"
-            + normalized.str.slice(6, 8)
-        )
-        # Formatting alone can turn 20240230 into an apparently valid label.
-        parsed = pd.to_datetime(formatted, format="%Y-%m-%d", errors="coerce")
+        normalized = normalized.where(normalized.str.fullmatch(r"[0-9]{8}"))
+        parsed = pd.to_datetime(normalized, format="%Y%m%d", errors="coerce")
         return parsed.dt.strftime("%Y-%m-%d").astype("string")
 
     @staticmethod
@@ -490,18 +509,10 @@ class Mobility:
             .str.replace_all("-", "", literal=True)
             .str.replace_all("/", "", literal=True)
             .str.replace_all(" ", "", literal=True)
-            .str.pad_start(8, "0")
         )
-        formatted = pl.concat_str(
-            [
-                normalized.str.slice(0, 4),
-                pl.lit("-"),
-                normalized.str.slice(4, 2),
-                pl.lit("-"),
-                normalized.str.slice(6, 2),
-            ]
-        )
-        return formatted.str.strptime(pl.Date, "%Y-%m-%d", strict=False).cast(pl.String)
+        return pl.when(normalized.str.contains(r"^[0-9]{8}$")).then(
+            normalized.str.strptime(pl.Date, "%Y%m%d", strict=False)
+        ).otherwise(None).cast(pl.String)
 
     @staticmethod
     def _polars_hour(column: str):
@@ -590,15 +601,11 @@ class Mobility:
                 valid.append(filepath)
         return valid
 
-    def _build_od_lazy_polars(self, filepaths, keep_activity, social_agg):
+    def _build_od_lazy_polars(self, filepaths, keep_activity, social_agg, dimensions=None):
         """Build the optimized Polars query plan for one or more OD files."""
-        source_to_target = {
-            "actividad_origen": "activity_origin",
-            "actividad_destino": "activity_destination",
-            "renta": "income",
-            "edad": "age",
-            "sexo": "gender",
-        }
+        selected_dimensions = _selected_od_dimensions(
+            keep_activity, social_agg, dimensions
+        )
         required_source = [
             "fecha",
             "periodo",
@@ -625,27 +632,20 @@ class Mobility:
             self._polars_identifier("destino").alias("id_destination"),
         ]
 
-        if keep_activity:
-            for source in ("actividad_origen", "actividad_destino"):
+        for name in selected_dimensions:
+            source = _OD_DIMENSIONS[name]
+            expression = pl.lit(None, dtype=pl.String)
+            if source in source_columns:
                 expression = (
-                    self._polars_nullable_string(source).replace(_ACTIVITY_TRANSLATIONS)
-                    if source in source_columns
-                    else pl.lit(None, dtype=pl.String)
+                    self._polars_identifier(source)
+                    if name == "residence_province_ine_code"
+                    else self._polars_nullable_string(source)
                 )
-                expressions.append(expression.alias(source_to_target[source]))
-
-        if social_agg:
-            for source in ("renta", "edad", "sexo"):
-                expression = (
-                    self._polars_nullable_string(source)
-                    if source in source_columns
-                    else pl.lit(None, dtype=pl.String)
-                )
-                if source == "sexo":
-                    expression = expression.replace(
-                        {"hombre": "male", "mujer": "female"}
-                    )
-                expressions.append(expression.alias(source_to_target[source]))
+            if name.startswith("activity_"):
+                expression = expression.replace(_ACTIVITY_TRANSLATIONS)
+            elif name == "gender":
+                expression = expression.replace({"hombre": "male", "mujer": "female"})
+            expressions.append(expression.alias(name))
 
         expressions.extend(
             [
@@ -659,10 +659,7 @@ class Mobility:
         )
 
         group_cols = ["date", "hour", "id_origin", "id_destination"]
-        if keep_activity:
-            group_cols += ["activity_origin", "activity_destination"]
-        if social_agg:
-            group_cols += ["income", "age", "gender"]
+        group_cols += list(selected_dimensions)
 
         return (
             lazy_frame.select(expressions)
@@ -696,6 +693,7 @@ class Mobility:
         keep_activity,
         social_agg,
         as_pandas=True,
+        dimensions=None,
     ):
         """Execute one optimized Polars plan across all requested OD files."""
         filepaths = self._valid_input_files(filepaths)
@@ -703,7 +701,9 @@ class Mobility:
             return None
         result, recovered = self._collect_polars_files(
             filepaths,
-            lambda paths: self._build_od_lazy_polars(paths, keep_activity, social_agg),
+            lambda paths: self._build_od_lazy_polars(
+                paths, keep_activity, social_agg, dimensions
+            ),
             "OD",
         )
         if result is None or result.is_empty():
@@ -717,15 +717,20 @@ class Mobility:
             ).sort(group_cols, nulls_last=True)
         return self._polars_to_pandas(result) if as_pandas else result
 
-    def _process_single_od_file_polars(self, filepath, keep_activity, social_agg):
+    def _process_single_od_file_polars(
+        self, filepath, keep_activity, social_agg, dimensions=None
+    ):
         """Compatibility wrapper for processing one OD file with Polars."""
         return self._process_od_files_polars(
             [filepath],
             keep_activity=keep_activity,
             social_agg=social_agg,
+            dimensions=dimensions,
         )
 
-    def _process_single_od_file(self, filepath, keep_activity, social_agg):
+    def _process_single_od_file(
+        self, filepath, keep_activity, social_agg, dimensions=None
+    ):
         """Extract common OD file processing logic."""
         
         print(f"Processing file: {filepath}")
@@ -747,6 +752,7 @@ class Mobility:
                 filepath,
                 keep_activity=keep_activity,
                 social_agg=social_agg,
+                dimensions=dimensions,
             )
         
         try:
@@ -761,6 +767,7 @@ class Mobility:
                     "actividad_origen": "string",
                     "actividad_destino": "string",
                     "residencia": "string",
+                    "distancia": "string",
                     "renta": "string",
                     "edad": "string",
                     "sexo": "string",
@@ -787,16 +794,9 @@ class Mobility:
                 "periodo": "hour",
                 "origen": "id_origin",
                 "destino": "id_destination",
-                "actividad_origen": "activity_origin",
-                "actividad_destino": "activity_destination",
-                "residencia": "residence_province_ine_code",
-                "distancia": "distance",
                 "viajes": "n_trips",
                 "viajes_km": "trips_total_length_km",
-                # socio-demo
-                "renta": "income",
-                "edad": "age",
-                "sexo": "gender",
+                **{source: name for name, source in _OD_DIMENSIONS.items()},
             },
             inplace=True,
         )
@@ -810,17 +810,22 @@ class Mobility:
             )
             return None
 
-        for optional_col in ["activity_origin", "activity_destination", "income", "age", "gender"]:
+        selected_dimensions = _selected_od_dimensions(
+            keep_activity, social_agg, dimensions
+        )
+        for optional_col in selected_dimensions:
             if optional_col not in df.columns:
                 df[optional_col] = pd.NA
-            df[optional_col] = self._normalize_optional_string_series(df[optional_col])
+            normalizer = (
+                self._normalize_identifier_series
+                if optional_col == "residence_province_ine_code"
+                else self._normalize_optional_string_series
+            )
+            df[optional_col] = normalizer(df[optional_col])
 
         df["date"] = self._normalize_date_series(df["date"])
         df["id_origin"] = self._normalize_identifier_series(df["id_origin"])
         df["id_destination"] = self._normalize_identifier_series(df["id_destination"])
-        if "residence_province_ine_code" in df.columns:
-            df["residence_province_ine_code"] = self._normalize_identifier_series(df["residence_province_ine_code"])
-
         hour_numeric = self._to_numeric(df["hour"])
         valid_hour = hour_numeric.between(0, 23) & hour_numeric.mod(1).eq(0)
         df["hour"] = hour_numeric.where(valid_hour).astype("Int64")
@@ -853,14 +858,9 @@ class Mobility:
             inplace=True,
         )
 
-        # ------------------------------------------------------
-        # BUILD GROUP-BY KEY ACCORDING TO THE TWO FLAGS
-        # ------------------------------------------------------
+        # Keep requested dimensions as grouping keys before summing flows.
         group_cols = ["date", "hour", "id_origin", "id_destination"]
-        if keep_activity:
-            group_cols += ["activity_origin", "activity_destination"]
-        if social_agg:
-            group_cols += ["income", "age", "gender"]
+        group_cols += list(selected_dimensions)
 
         # MITMA uses missing demographic values when information cannot be
         # provided (for example for privacy reasons).  They are still valid
@@ -978,12 +978,43 @@ class Mobility:
             return frame.is_empty()
         return frame.empty
 
+    def _check_requested_od_dimensions(self, filepaths, dimensions, m_type) -> None:
+        """Fail clearly when an explicitly requested source field is absent."""
+        manifest = self._acquisition_manifests.get(m_type)
+        dates = (
+            dict(zip(manifest["local_path"], manifest["date"]))
+            if manifest is not None else {}
+        )
+        for path in filepaths:
+            try:
+                with gzip.open(path, "rt", encoding="utf-8-sig") as source:
+                    columns = {
+                        Mobility._normalize_column_name(name)
+                        for name in next(csv.reader(source, delimiter="|"))
+                    }
+            except (OSError, StopIteration, UnicodeError, csv.Error):
+                continue  # The existing source validator reports unreadable files.
+            missing = [
+                f"{name} (source column '{_OD_DIMENSIONS[name]}')"
+                for name in dimensions if _OD_DIMENSIONS[name] not in columns
+            ]
+            if missing:
+                day = dates.get(path)
+                location = f"date {day}" if day is not None else f"file {path}"
+                raise ValueError(
+                    f"OD data for {location} is missing requested dimensions: "
+                    f"{', '.join(missing)}. Source: {path}. "
+                    "Adjust the requested dates or dimensions. "
+                    "allow_partial=True does not bypass this check."
+                )
+
     def get_od_data(
         self,
         keep_activity: bool = False,
         return_df: bool = False,
         social_agg: bool = False,
         allow_partial: bool = False,
+        dimensions: Optional[Sequence[str]] = None,
     ):
         """
         Function to download and save the origin-destination data.
@@ -1010,6 +1041,17 @@ class Mobility:
             is missing or has invalid mandatory OD rows. If True, save only
             fully valid source days with a ``_partial`` filename suffix and
             inspect ``get_acquisition_manifest()`` for excluded dates.
+            Missing explicitly requested dimension columns always raise an error.
+
+        dimensions : sequence of str, optional
+            Optional OD columns to retain as grouping keys: ``activity_origin``,
+            ``activity_destination``, ``residence_province_ine_code``,
+            ``distance``, ``income``, ``age``, or ``gender``. Omitted dimensions
+            are aggregated away. Use this instead of ``keep_activity`` and
+            ``social_agg``; the older flags remain supported.
+            Every source day must contain the requested columns. Missing values
+            within an existing column are retained; a missing column raises a
+            ``ValueError`` identifying the date and dimension.
 
         
         Examples
@@ -1031,9 +1073,30 @@ class Mobility:
         4  2023-04-01     0     01001          48036    2.750             147.724000
         """
 
+        if dimensions is not None:
+            if keep_activity or social_agg:
+                raise ValueError(
+                    "dimensions cannot be combined with keep_activity or social_agg."
+                )
+            if isinstance(dimensions, (str, bytes)) or not isinstance(
+                dimensions, Sequence
+            ):
+                raise TypeError("dimensions must be a sequence of column names.")
+            if any(not isinstance(name, str) for name in dimensions):
+                raise TypeError("dimensions must contain only column names.")
+            unknown = sorted(set(dimensions) - _OD_DIMENSIONS.keys())
+            if unknown:
+                raise ValueError("Unknown OD dimensions: %s" % unknown)
+            if len(dimensions) != len(set(dimensions)):
+                raise ValueError("dimensions must not contain duplicates.")
+            dimensions = tuple(name for name in _OD_DIMENSIONS if name in dimensions)
+
         m_type = "Viajes" if self.version == 2 else "maestra1"
         if self.version == 1:
-            if keep_activity and self.zones == "municipios":
+            selected = _selected_od_dimensions(keep_activity, social_agg, dimensions)
+            if self.source_zones == "municipios" and any(
+                name.startswith("activity_") for name in selected
+            ):
                 raise ValueError(
                     "Version 1 municipality OD files do not contain activity columns. "
                     "Use zones='districts' or keep_activity=False."
@@ -1048,6 +1111,8 @@ class Mobility:
             social_agg = False
 
         local_list = self._donwload_helper(m_type)
+        if dimensions is not None:
+            self._check_requested_od_dimensions(local_list, dimensions, m_type)
         acquisition_partial = self._check_acquisition_coverage(m_type, allow_partial)
         print("Generating parquet file for ODs....")
 
@@ -1057,6 +1122,7 @@ class Mobility:
                 keep_activity=keep_activity,
                 social_agg=social_agg,
                 as_pandas=False,
+                dimensions=dimensions,
             )
             processing_partial = self._check_od_processing_coverage(
                 m_type, local_list, frame, allow_partial
@@ -1069,11 +1135,13 @@ class Mobility:
                 if frame.is_empty():
                     print("No valid data found")
                     return None
+            frame = self._aggregate_provinces(frame, m_type)
             self._saving_parquet(
                 frame, m_type, keep_activity=keep_activity, social_agg=social_agg,
                 partial=acquisition_partial or processing_partial,
+                dimensions=dimensions,
             )
-            return self._polars_to_pandas(frame) if return_df else None
+            return self._return_output(frame, m_type) if return_df else None
 
         if self.use_dask:
             return self._process_od_data_dask(
@@ -1084,6 +1152,7 @@ class Mobility:
                 return_df,
                 allow_partial,
                 acquisition_partial,
+                dimensions,
             )
 
         frames = []
@@ -1092,6 +1161,7 @@ class Mobility:
                 filepath,
                 keep_activity,
                 social_agg,
+                dimensions,
             )
             if result is not None:
                 frames.append(result)
@@ -1112,15 +1182,17 @@ class Mobility:
             if frame.empty:
                 print("No valid data found")
                 return None
+        frame = self._aggregate_provinces(frame, m_type)
         self._saving_parquet(
             frame, m_type, keep_activity=keep_activity, social_agg=social_agg,
             partial=acquisition_partial or processing_partial,
+            dimensions=dimensions,
         )
-        return frame if return_df else None
+        return self._return_output(frame, m_type) if return_df else None
 
     def _process_od_data_dask(
         self, local_list, m_type, keep_activity, social_agg, return_df,
-        allow_partial, acquisition_partial,
+        allow_partial, acquisition_partial, dimensions=None,
     ):
         """Process OD data using Dask for better performance with large datasets """
         print("Processing with Dask...")
@@ -1130,7 +1202,9 @@ class Mobility:
         
         @delayed
         def process_single_file(filepath):
-            return self._process_single_od_file(filepath, keep_activity, social_agg)
+            return self._process_single_od_file(
+                filepath, keep_activity, social_agg, dimensions
+            )
         
         # Create delayed tasks for each file
         delayed_tasks = [process_single_file(f) for f in local_list]
@@ -1144,7 +1218,9 @@ class Mobility:
             # Fallback using the same processing method
             processed_dfs = []
             for f in tqdm.tqdm(local_list):
-                result = self._process_single_od_file(f, keep_activity, social_agg)
+                result = self._process_single_od_file(
+                    f, keep_activity, social_agg, dimensions
+                )
                 if result is not None:
                     processed_dfs.append(result)
         
@@ -1168,11 +1244,13 @@ class Mobility:
                 print("No valid data found")
                 return None
         
+        df = self._aggregate_provinces(df, m_type)
         self._saving_parquet(
             df, m_type, keep_activity=keep_activity, social_agg=social_agg,
             partial=acquisition_partial or processing_partial,
+            dimensions=dimensions,
         )
-        return df if return_df else None
+        return self._return_output(df, m_type) if return_df else None
 
     def _build_overnight_lazy_polars(self, filepaths):
         """Build the Polars plan for overnight-stay files."""
@@ -1508,10 +1586,11 @@ class Mobility:
                 print("No valid data found")
                 return None
 
+        frame = self._aggregate_provinces(frame, m_type)
         self._saving_parquet(frame, m_type, partial=partial or processing_partial)
         if not return_df:
             return None
-        return self._polars_to_pandas(frame) if self.backend == "polars" else frame
+        return self._return_output(frame, m_type)
 
     def get_number_of_trips_data(self, return_df: bool = False, allow_partial: bool = False):
         """
@@ -1571,22 +1650,115 @@ class Mobility:
                 print("No valid data found")
                 return None
 
+        frame = self._aggregate_provinces(frame, m_type)
         self._saving_parquet(frame, m_type, partial=partial or processing_partial)
         if not return_df:
             return None
-        return self._polars_to_pandas(frame) if self.backend == "polars" else frame
+        return self._return_output(frame, m_type)
+
+    def _aggregate_provinces(self, frame, m_type):
+        """Map geographic IDs once, then sum every additive product measure."""
+        if self.zones != "provinces":
+            return frame
+        from pyspainmobility.zones.zones import Zones
+
+        areas, measures = {
+            "Viajes": (("id_origin", "id_destination"), ("n_trips", "trips_total_length_km")),
+            "maestra1": (("id_origin", "id_destination"), ("n_trips", "trips_total_length_km")),
+            "Pernoctaciones": (("residence_area", "overnight_stay_area"), ("people",)),
+            "Personas": (("overnight_stay_area",), ("people",)),
+            "maestra2": (("overnight_stay_area",), ("people",)),
+        }[m_type]
+        is_polars = isinstance(frame, pl.DataFrame)
+        ids = set().union(*(
+            frame[column].unique().to_list() if is_polars
+            else frame[column].drop_duplicates().tolist()
+            for column in areas
+        ))
+        if self._province_zones is None:
+            self._province_zones = Zones(
+                zones=self.source_zones, version=self.version,
+                output_directory=self.output_path,
+            )
+        mapping = self._province_zones.get_province_mapping(source_ids=ids, unmapped="exclude")
+        correspondence = dict(zip(mapping["source_id"], mapping["target_id"]))
+        keys = [column for column in frame.columns if column not in measures]
+        if is_polars:
+            mapped = frame.with_columns(
+                pl.col(column).replace_strict(correspondence, default=None, return_dtype=pl.String)
+                for column in areas
+            )
+            excluded = pl.any_horizontal(pl.col(column).is_null() for column in areas)
+            report = mapped.group_by("date").agg(
+                pl.len().alias("input_rows"),
+                excluded.sum().alias("excluded_rows"),
+                *(pl.col(column).sum().alias("input_" + column) for column in measures),
+                *(pl.col(column).filter(excluded).sum().alias("excluded_" + column) for column in measures),
+            ).sort("date").to_dicts()
+            result = mapped.filter(~excluded).group_by(keys).agg(
+                pl.col(column).sum() for column in measures
+            ).select(frame.columns).sort(keys, nulls_last=True)
+        else:
+            mapped = frame.assign(**{column: frame[column].map(correspondence) for column in areas})
+            excluded = mapped[list(areas)].isna().any(axis=1)
+            diagnostics = frame[["date", *measures]].copy()
+            diagnostics["input_rows"] = 1
+            diagnostics["excluded_rows"] = excluded.astype(int)
+            for column in measures:
+                diagnostics["excluded_" + column] = diagnostics[column].where(excluded, 0)
+            diagnostics.rename(columns={column: "input_" + column for column in measures}, inplace=True)
+            report = diagnostics.groupby("date").sum().reset_index().to_dict("records")
+            result = mapped.loc[~excluded].groupby(
+                keys, dropna=False, observed=True, sort=False
+            )[list(measures)].sum().reset_index().loc[:, frame.columns].sort_values(
+                keys, na_position="last"
+            ).reset_index(drop=True)
+        totals = ("input_rows", "excluded_rows", *("input_" + c for c in measures),
+                  *("excluded_" + c for c in measures))
+        spatial = {
+            "unmapped_source_ids": mapping.attrs["unmapped_source_ids"],
+            "by_date": report,
+            **{key: sum(row[key] for row in report) for key in totals},
+            **{"output_" + column: float(result[column].sum()) for column in measures},
+        }
+        if any(not np.isfinite(value) for key, value in spatial.items() if key.startswith(("input_", "excluded_", "output_"))):
+            raise ValueError("Province aggregation produced non-finite totals.")
+        if not hasattr(self, "_province_reports"):
+            self._province_reports = {}
+        self._province_reports[m_type] = spatial
+        if spatial["excluded_rows"]:
+            warnings.warn(
+                "Province aggregation excluded %d processed rows involving %d unmapped zones. "
+                "Inspect get_acquisition_manifest(%r) or the saved provenance JSON for excluded totals."
+                % (spatial["excluded_rows"], len(spatial["unmapped_source_ids"]), m_type),
+                RuntimeWarning, stacklevel=2,
+            )
+        return result
+
+    def _return_output(self, frame, m_type):
+        result = self._polars_to_pandas(frame) if isinstance(frame, pl.DataFrame) else frame
+        if self.zones == "provinces":
+            if result.empty:
+                measures = {"hour", "n_trips", "trips_total_length_km", "people"}
+                result = result.astype({column: "string" for column in result.columns if column not in measures})
+            result.attrs.update(self._output_provenance(m_type))
+        return result
 
     def _saving_parquet(
         self, df, m_type: str, *, keep_activity: bool = False,
-        social_agg: bool = False, partial: bool = False,
+        social_agg: bool = False, partial: bool = False, dimensions=None,
     ):
         print('Writing the parquet file....')
-        stem = f"{m_type}_{self.zones}_{self.start_date}_{self.end_date}_v{self.version}"
+        level = "provinces_derived" if self.zones == "provinces" else self.zones
+        stem = f"{m_type}_{level}_{self.start_date}_{self.end_date}_v{self.version}"
         if m_type in ("Viajes", "maestra1"):
-            if keep_activity:
-                stem += "_activity"
-            if social_agg:
-                stem += "_social"
+            if dimensions:
+                stem += "_dims_" + "_".join(dimensions)
+            elif dimensions is None:
+                if keep_activity:
+                    stem += "_activity"
+                if social_agg:
+                    stem += "_social"
         if partial:
             stem += "_partial"
         output_file = os.path.join(
@@ -1598,6 +1770,7 @@ class Mobility:
             delete=False,
         ) as temporary:
             temporary_path = temporary.name
+        provenance_path = temporary_path + ".json"
         try:
             if pl is not None and isinstance(df, pl.DataFrame):
                 df.write_parquet(temporary_path)
@@ -1614,10 +1787,17 @@ class Mobility:
                         for column in df.columns
                     }
                     pl.DataFrame(columns).write_parquet(temporary_path)
+            if self.zones == "provinces":
+                utils.write_json_atomic(
+                    self._output_provenance(m_type), provenance_path
+                )
             os.replace(temporary_path, output_file)
+            if self.zones == "provinces":
+                os.replace(provenance_path, output_file + ".provenance.json")
         finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
+            for path in (temporary_path, provenance_path):
+                if os.path.exists(path):
+                    os.unlink(path)
         print('Parquet file generated successfully at ', output_file)
 
     def get_acquisition_manifest(self, m_type: str = "Viajes") -> pd.DataFrame:
@@ -1629,6 +1809,8 @@ class Mobility:
         ``parse_status`` distinguishes valid, genuinely empty, and invalid
         source files. The OD manifest can be passed to
         ``build_temporal_network`` for coverage-aware averages.
+        Provincial products add per-day input/excluded counts and measures;
+        ``attrs`` identifies the derived level and the unmapped source IDs.
         """
         if m_type not in self._acquisition_manifests:
             raise ValueError(
@@ -1641,7 +1823,28 @@ class Mobility:
             self._finalize_od_manifest(
                 m_type, filepaths, processed_success=processed_success
             )
-        return self._acquisition_manifests[m_type].copy()
+        manifest = self._acquisition_manifests[m_type].copy()
+        if getattr(self, "zones", None) == "provinces":
+            report = getattr(self, "_province_reports", {}).get(m_type, {})
+            if report.get("by_date"):
+                diagnostics = pd.DataFrame(report["by_date"])
+                manifest = manifest.merge(diagnostics, on="date", how="left", validate="one_to_one")
+                columns = diagnostics.columns.drop("date")
+                manifest[columns] = manifest[columns].fillna(0)
+            manifest.attrs.update(self._output_provenance(m_type))
+        return manifest
+
+    def _output_provenance(self, m_type=None):
+        """Describe the requested level separately from the downloaded source."""
+        zones = getattr(self, "zones", None)
+        return {
+            "source_zones": getattr(self, "source_zones", zones),
+            "output_zones": zones,
+            "derived": zones == "provinces",
+            "method": "sum_by_ine_province" if zones == "provinces" else None,
+            "version": int(self.version) if hasattr(self, "version") else None,
+            "spatial": deepcopy(getattr(self, "_province_reports", {}).get(m_type, {})),
+        }
 
     def _remember_od_processing(
         self, m_type: str, filepaths, processed_success: bool
@@ -1825,22 +2028,24 @@ class Mobility:
         )
         self._acquisition_manifests[m_type]["parse_status"] = "not_processed"
         getattr(self, "_od_processing_outcomes", {}).pop(m_type, None)
+        getattr(self, "_province_reports", {}).pop(m_type, None)
 
     def _donwload_helper(self, m_type:str):
         local_list = []
         records = []
+        source_zones = getattr(self, "source_zones", self.zones)
         if self.version == 2:
             for d in self.dates:
                 d_first = d[:7]
                 d_second = d.replace("-", "")
                 if m_type == 'Personas':
-                    download_url = f"https://movilidad-opendata.mitma.es/estudios_basicos/por-{self.zones}/{m_type.lower()}/ficheros-diarios/{d_first}/{d_second}_{m_type}_dia_{self.zones}.csv.gz"
+                    download_url = f"https://movilidad-opendata.mitma.es/estudios_basicos/por-{source_zones}/{m_type.lower()}/ficheros-diarios/{d_first}/{d_second}_{m_type}_dia_{source_zones}.csv.gz"
                 else:
-                    download_url = f"https://movilidad-opendata.mitma.es/estudios_basicos/por-{self.zones}/{m_type.lower()}/ficheros-diarios/{d_first}/{d_second}_{m_type}_{self.zones}.csv.gz"
+                    download_url = f"https://movilidad-opendata.mitma.es/estudios_basicos/por-{source_zones}/{m_type.lower()}/ficheros-diarios/{d_first}/{d_second}_{m_type}_{source_zones}.csv.gz"
 
                 print('Downloading file from', download_url)
                 local_path = os.path.join(
-                    self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.csv.gz"
+                    self.output_path, f"{d_second}_{m_type}_{source_zones}_v{self.version}.csv.gz"
                 )
                 try:
                     utils.download_file_if_not_existing(download_url, local_path)
@@ -1857,17 +2062,17 @@ class Mobility:
                     continue
         elif self.version == 1:
 
-            if self.zones == 'gaus':
+            if source_zones == 'gaus':
                 raise Exception('gaus is not a valid zone for version 1. Please use version 2 or use a different zone')
 
             for d in self.dates:
                 d_first = d[:7]
                 d_second = d.replace("-", "")
                 local_path = os.path.join(
-                    self.output_path, f"{d_second}_{m_type}_{self.zones}_v{self.version}.txt.gz"
+                    self.output_path, f"{d_second}_{m_type}_{source_zones}_v{self.version}.txt.gz"
                 )
                 try:
-                    url_base = f"https://opendata-movilidad.mitma.es/{m_type}-mitma-{self.zones}/ficheros-diarios/{d_first}/{d_second}_{m_type[:-1]}_{m_type[-1]}_mitma_{self.zones[:-1]}.txt.gz"
+                    url_base = f"https://opendata-movilidad.mitma.es/{m_type}-mitma-{source_zones}/ficheros-diarios/{d_first}/{d_second}_{m_type[:-1]}_{m_type[-1]}_mitma_{source_zones[:-1]}.txt.gz"
                     utils.download_file_if_not_existing(url_base, local_path)
                     if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                         local_list.append(local_path)

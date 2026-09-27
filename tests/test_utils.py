@@ -62,141 +62,49 @@ def test_zone_normalization_is_case_insensitive_for_aliases():
     assert utils.zone_normalization("MUNICIPAL") == "municipios"
 
 
-def test_available_mobility_data_marks_existing_file_as_downloaded(monkeypatch, tmp_path):
-    filename = "20230101_Viajes_municipios.csv.gz"
-    existing_file = tmp_path / filename
-    existing_file.write_bytes(b"already downloaded")
+@pytest.mark.parametrize(
+    "version,cached_names,expected_name",
+    [
+        pytest.param(2, ("raw",), "raw", id="v2-raw"),
+        pytest.param(2, ("versioned",), "versioned", id="v2-versioned"),
+        pytest.param(1, ("versioned",), "versioned", id="v1-versioned"),
+        pytest.param(2, ("raw", "versioned"), "raw", id="raw-preferred"),
+        pytest.param(2, (), None, id="missing"),
+    ],
+)
+def test_available_mobility_data_detects_cached_files(
+    monkeypatch, tmp_path, version, cached_names, expected_name
+):
+    stem, extension = (
+        ("20230101_Viajes_municipios", ".csv.gz") if version == 2
+        else ("20200311_maestra_1_mitma_municipio", ".txt.gz")
+    )
+    filename = stem + extension
+    paths = {
+        "raw": tmp_path / filename,
+        "versioned": tmp_path / f"{stem}_v{version}{extension}",
+    }
+    for name in cached_names:
+        paths[name].write_bytes(b"already downloaded")
 
     rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss>
-  <channel>
-    <item>
-      <title>{filename}</title>
-      <link>https://example.org/{filename}</link>
-      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
-    </item>
-  </channel>
-</rss>
+<rss><channel><item>
+  <title>{filename}</title>
+  <link>https://example.org/{filename}</link>
+  <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
+</item></channel></rss>
 """.encode("utf-8")
-
-    def fake_urlopen(_url):
-        return _BytesContext(rss_xml)
-
-    monkeypatch.setattr(utils, "urlopen", fake_urlopen)
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _BytesContext(rss_xml))
     monkeypatch.setattr(utils, "data_directory", str(tmp_path))
 
-    df = utils.available_mobility_data(version=2)
+    df = utils.available_mobility_data(version=version)
 
     assert len(df) == 1
-    assert bool(df.iloc[0]["downloaded"]) is True
-    assert Path(df.iloc[0]["local_path"]) == existing_file
-
-
-def test_available_mobility_data_detects_versioned_v2_downloaded_file(monkeypatch, tmp_path):
-    filename = "20230101_Viajes_municipios.csv.gz"
-    versioned = tmp_path / "20230101_Viajes_municipios_v2.csv.gz"
-    versioned.write_bytes(b"versioned v2")
-
-    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss>
-  <channel>
-    <item>
-      <title>{filename}</title>
-      <link>https://example.org/{filename}</link>
-      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
-    </item>
-  </channel>
-</rss>
-""".encode("utf-8")
-
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
-    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
-
-    df = utils.available_mobility_data(version=2)
-
-    assert len(df) == 1
-    assert bool(df.iloc[0]["downloaded"]) is True
-    assert Path(df.iloc[0]["local_path"]) == versioned
-
-
-def test_available_mobility_data_detects_versioned_v1_downloaded_file(monkeypatch, tmp_path):
-    filename = "20200311_maestra_1_mitma_municipio.txt.gz"
-    versioned = tmp_path / "20200311_maestra_1_mitma_municipio_v1.txt.gz"
-    versioned.write_bytes(b"versioned v1")
-
-    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss>
-  <channel>
-    <item>
-      <title>{filename}</title>
-      <link>https://example.org/{filename}</link>
-      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
-    </item>
-  </channel>
-</rss>
-""".encode("utf-8")
-
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
-    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
-
-    df = utils.available_mobility_data(version=1)
-
-    assert len(df) == 1
-    assert bool(df.iloc[0]["downloaded"]) is True
-    assert Path(df.iloc[0]["local_path"]) == versioned
-
-
-def test_available_mobility_data_prefers_raw_name_over_versioned(monkeypatch, tmp_path):
-    filename = "20230101_Viajes_municipios.csv.gz"
-    raw = tmp_path / filename
-    raw.write_bytes(b"raw")
-    versioned = tmp_path / "20230101_Viajes_municipios_v2.csv.gz"
-    versioned.write_bytes(b"versioned")
-
-    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss>
-  <channel>
-    <item>
-      <title>{filename}</title>
-      <link>https://example.org/{filename}</link>
-      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
-    </item>
-  </channel>
-</rss>
-""".encode("utf-8")
-
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
-    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
-
-    df = utils.available_mobility_data(version=2)
-
-    assert len(df) == 1
-    assert bool(df.iloc[0]["downloaded"]) is True
-    assert Path(df.iloc[0]["local_path"]) == raw
-
-
-def test_available_mobility_data_reports_false_when_no_file_present(monkeypatch, tmp_path):
-    filename = "20230102_Viajes_municipios.csv.gz"
-    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss>
-  <channel>
-    <item>
-      <title>{filename}</title>
-      <link>https://example.org/{filename}</link>
-      <pubDate>Tue, 10 Feb 2026 00:00:00 GMT</pubDate>
-    </item>
-  </channel>
-</rss>
-""".encode("utf-8")
-
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
-    monkeypatch.setattr(utils, "data_directory", str(tmp_path))
-
-    df = utils.available_mobility_data(version=2)
-
-    assert len(df) == 1
-    assert bool(df.iloc[0]["downloaded"]) is False
-    assert df.iloc[0]["local_path"] is None
+    assert bool(df.iloc[0]["downloaded"]) is (expected_name is not None)
+    if expected_name is None:
+        assert df.iloc[0]["local_path"] is None
+    else:
+        assert Path(df.iloc[0]["local_path"]) == paths[expected_name]
 
 
 def test_available_mobility_data_multi_entry_mixed_download_status(monkeypatch, tmp_path):
@@ -216,7 +124,7 @@ def test_available_mobility_data_multi_entry_mixed_download_status(monkeypatch, 
 </rss>
 """.encode("utf-8")
 
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _BytesContext(rss_xml))
     monkeypatch.setattr(utils, "data_directory", str(tmp_path))
 
     df = utils.available_mobility_data(version=2).sort_values("data_ymd").reset_index(drop=True)
@@ -257,7 +165,7 @@ def test_available_zoning_data_zone_none_returns_all_zoning_entries(monkeypatch)
 </rss>
 """.encode("utf-8")
 
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _BytesContext(rss_xml))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _BytesContext(rss_xml))
     df = utils.available_zoning_data(version=2, zone=None)
 
     assert set(df["filename"]) == {
@@ -292,7 +200,7 @@ def test_download_file_if_not_existing_writes_file(monkeypatch, tmp_path):
     output_file = tmp_path / "payload.bin"
     payload = b"downloaded-content"
 
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload, status=200))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _HTTPBytesResponse(payload, status=200))
 
     utils.download_file_if_not_existing("https://example.org/payload.bin", str(output_file))
 
@@ -317,7 +225,7 @@ def test_download_file_if_not_existing_replaces_empty_file(monkeypatch, tmp_path
     output_file.write_bytes(b"")
     payload = b"fresh"
 
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload, status=200))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _HTTPBytesResponse(payload, status=200))
 
     utils.download_file_if_not_existing("https://example.org/empty.bin", str(output_file))
     assert output_file.read_bytes() == payload
@@ -326,7 +234,7 @@ def test_download_file_if_not_existing_replaces_empty_file(monkeypatch, tmp_path
 def test_download_file_if_not_existing_supports_filename_only_path(monkeypatch, tmp_path):
     payload = b"just-file"
     output_file = tmp_path / "standalone.bin"
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload, status=200))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _HTTPBytesResponse(payload, status=200))
     monkeypatch.chdir(tmp_path)
 
     utils.download_file_if_not_existing("https://example.org/standalone.bin", "standalone.bin")
@@ -337,7 +245,7 @@ def test_download_replaces_corrupt_cached_gzip(monkeypatch, tmp_path):
     output_file = tmp_path / "daily.csv.gz"
     output_file.write_bytes(b"incomplete gzip payload")
     payload = gzip.compress(b"fecha|viajes\n20240101|3\n")
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _HTTPBytesResponse(payload))
 
     utils.download_file_if_not_existing(
         "https://example.org/daily.csv.gz", str(output_file)
@@ -351,7 +259,7 @@ def test_validated_gzip_cache_skips_repeat_decompression_and_checks_changes(
 ):
     output_file = tmp_path / "daily.csv.gz"
     payload = gzip.compress(b"fecha|viajes\n20240101|3\n")
-    monkeypatch.setattr(utils, "urlopen", lambda *_: _HTTPBytesResponse(payload))
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: _HTTPBytesResponse(payload))
     url = "https://example.org/daily.csv.gz"
     utils.download_file_if_not_existing(url, str(output_file))
 
@@ -381,8 +289,9 @@ def test_validated_gzip_cache_skips_repeat_decompression_and_checks_changes(
     assert gzip.decompress(output_file.read_bytes()) == b"fecha|viajes\n20240101|3\n"
 
 
+@pytest.mark.parametrize("error_type", [OSError, TimeoutError])
 def test_download_interruption_keeps_final_path_and_removes_temporary_file(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, error_type
 ):
     output_file = tmp_path / "daily.csv.gz"
     output_file.write_bytes(b"old corrupt cache")
@@ -395,14 +304,36 @@ def test_download_interruption_keeps_final_path_and_removes_temporary_file(
         def read(self, size=-1):
             self.calls += 1
             if self.calls == 2:
-                raise OSError("connection interrupted")
+                raise error_type("connection interrupted")
             return super().read(size)
 
-    monkeypatch.setattr(utils, "urlopen", lambda *_: InterruptedResponse())
+    monkeypatch.setattr(utils, "urlopen", lambda *_, **_kwargs: InterruptedResponse())
     with pytest.raises(OSError, match="connection interrupted"):
         utils.download_file_if_not_existing(
             "https://example.org/daily.csv.gz", str(output_file)
         )
 
+    assert output_file.read_bytes() == b"old corrupt cache"
+    assert list(tmp_path.glob(".pyspainmobility-*")) == []
+
+
+@pytest.mark.parametrize("operation", ["mobility", "zoning", "download"])
+def test_http_requests_have_a_finite_timeout(monkeypatch, tmp_path, operation):
+    def stalled_request(_url, *, timeout=None):
+        assert timeout is not None and 0 < timeout <= 60
+        raise TimeoutError("server did not respond")
+
+    monkeypatch.setattr(utils, "urlopen", stalled_request)
+    output_file = tmp_path / "daily.csv.gz"
+    output_file.write_bytes(b"old corrupt cache")
+    with pytest.raises(TimeoutError, match="server did not respond"):
+        if operation == "mobility":
+            utils.available_mobility_data()
+        elif operation == "zoning":
+            utils.available_zoning_data()
+        else:
+            utils.download_file_if_not_existing(
+                "https://example.org/daily.csv.gz", str(output_file)
+            )
     assert output_file.read_bytes() == b"old corrupt cache"
     assert list(tmp_path.glob(".pyspainmobility-*")) == []

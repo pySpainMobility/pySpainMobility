@@ -2,6 +2,7 @@
 
 import pandas as pd
 import polars as pl
+import pytest
 
 import pyspainmobility.mobility.mobility as mobility_module
 from pyspainmobility import (
@@ -10,6 +11,8 @@ from pyspainmobility import (
     build_network,
     build_temporal_network,
 )
+
+pytestmark = pytest.mark.minimal_install
 
 
 def test_polars_can_return_pandas_without_optional_arrow(monkeypatch):
