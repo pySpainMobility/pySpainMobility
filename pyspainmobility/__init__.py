@@ -1,4 +1,4 @@
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 from .mobility.mobility import Mobility  # noqa
 from .mobility.selection import select_od  # noqa

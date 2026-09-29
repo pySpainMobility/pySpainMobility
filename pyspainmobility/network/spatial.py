@@ -18,6 +18,7 @@ from .builder import (
     _pandas_to_polars,
     _selected_od_rows,
     _string_identifier_expression,
+    _string_node_id,
     build_network,
 )
 from .model import (
@@ -26,7 +27,6 @@ from .model import (
     NetworkSpec,
     SparseMobilityNetwork,
     _append_provenance,
-    _missing_node_id,
 )
 
 
@@ -48,20 +48,16 @@ def _mapping_table(
     if isinstance(mapping, MappingABC):
         frame = pl.DataFrame(
             {
-                source_column: [
-                    None if _missing_node_id(value) else str(value).strip()
-                    for value in mapping.keys()
-                ],
-                target_column: [
-                    None if _missing_node_id(value) else str(value).strip()
-                    for value in mapping.values()
-                ],
+                source_column: [_string_node_id(value) for value in mapping.keys()],
+                target_column: [_string_node_id(value) for value in mapping.values()],
             }
         )
     elif isinstance(mapping, pl.DataFrame):
         frame = mapping
     elif isinstance(mapping, pd.DataFrame):
-        frame = _pandas_to_polars(mapping)
+        frame = _pandas_to_polars(
+            mapping.loc[:, [name for name in names if name in mapping.columns]], names
+        )
     elif isinstance(mapping, (str, Path)):
         path = Path(mapping)
         if path.suffix.lower() != ".parquet":
@@ -390,7 +386,7 @@ def aggregate_od_network(
         if not isinstance(target_node_index, NodeIndex):
             raise TypeError("target_node_index must be a NodeIndex instance.")
         target_node_ids = target_node_index.node_ids
-    source = _as_lazy_frame(data)
+    source = _as_lazy_frame(data, spec)
     selected = _selected_od_rows(source, spec)
     table = _mapping_table(mapping, source_column, target_column)
     origin_mapping = table.rename({"_source": "_origin", "_target": "_mapped_origin"})

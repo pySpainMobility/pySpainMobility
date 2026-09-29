@@ -2,7 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## [2.1.2] - 2026-09-29
+
+### Fixed
+- Normalize mixed numeric/string pandas endpoint and mapping IDs before dtype
+  inference, and ignore unrelated pandas columns when constructing networks.
+  Reject collection-valued mapping IDs rather than inventing string zones.
+- Reject explicitly empty requested-date lists instead of selecting all
+  available manifest dates.
+- Validate CSR index bounds and reject negative entries before duplicate
+  summation can hide them in a network adjacency matrix.
+- Preserve zone geometries and populations when name metadata is incomplete.
 
 ## [2.1.1] - 2026-09-29
 

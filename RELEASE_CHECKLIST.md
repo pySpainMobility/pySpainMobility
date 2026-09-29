@@ -40,42 +40,43 @@ Use this checklist for every release so pip and conda stay aligned.
     - Confirm latest `documentation` workflow finished with deploy success
     - Open `https://pyspainmobility.github.io/pySpainMobility/`
 
-## Release 2.1.1: manual PyPI publication
+## Release 2.1.2: manual publication
 
-The corrected artifacts are in `dist/2.1.1/`. The source archive and wheel
-match the audited code; their metadata passed `twine check`.
+The pandas-input, empty-date-selection, CSR-validation and incomplete
+zone-metadata fixes are included in the artifacts in `dist/2.1.2/`.
 
-- Development suite: 312 passed; two opt-in live tests skipped in this run.
-- Installed wheel with current and minimum dependencies: 309 core tests
+### Verification
+
+- Development suite: 326 passed; two opt-in live tests skipped in this run.
+- Installed wheel with current and minimum dependencies: 323 core tests
   passed in each environment; optional adapters excluded from those runs.
-- Clean base installation: four tests and 11 API examples passed without
-  Arrow, Dask, NetworkX or Infomap; `pip check` passed.
-- Documentation: strict HTML build, 11 API examples and seven guide examples
-  passed. The README's offline network example also ran successfully.
-- Source SHA-256: `b6d59af5be397a1016839e87afad5eb278a9c551d6e7f431083115132099cae8`.
-- Wheel SHA-256: `467e00aae97568119425c82bd71b5e5e7afdc5e299a5d0995113cf518b0cb4d4`.
+- Base installation without Arrow, Dask, NetworkX or Infomap: 14 new regression
+  cases, four base-feature tests and 11 API examples passed; `pip check` passed
+  in all three installed-wheel environments.
+- Documentation: strict HTML build and seven guide examples passed.
+- All 18 package modules in both archives match the release source; the wheel
+  excludes tests, documentation, examples and downloaded data. Twine checks passed.
+- Source SHA-256: `46bf02218a019f2415494ae4276d9b5d27fbcf615aca4f1ab8412655a3392b83`.
+- Wheel SHA-256: `5df8bf4375ee52b1d2ec093f9d3bfc7bd9758db4fdd8663dceca35351999dc4f`.
 - Conda-forge update: [PR #8](https://github.com/conda-forge/pyspainmobility-feedstock/pull/8).
 
-From the repository directory, upload the verified artifacts:
+### PyPI and conda-forge
 
-```bash
-.venv/bin/python -m twine upload --username __token__ \
-  dist/2.1.1/pyspainmobility-2.1.1-py3-none-any.whl \
-  dist/2.1.1/pyspainmobility-2.1.1.tar.gz
+From the repository root, upload the verified artifacts using your PyPI token
+when Twine prompts for the password:
+
+```sh
+.venv/bin/python -m twine upload --username __token__ dist/2.1.2/*.whl dist/2.1.2/*.tar.gz
 ```
 
-Enter your PyPI token at the password prompt. Confirm the release exists:
+Keep the conda PR in draft until PyPI serves version 2.1.2 with the source hash
+above. Then mark it ready, rerun any failed source-download checks and merge
+after checks pass. Feedstock CI publishes the conda package automatically.
+If either artifact is rebuilt, repeat its verification and update the source
+SHA-256 in both recipes before uploading.
 
-```bash
-.venv/bin/python -c "import json,urllib.request as u;print(json.load(u.urlopen('https://pypi.org/pypi/pyspainmobility/2.1.1/json'))['info']['version'])"
-```
+### Superseded artifacts
 
-Keep the conda PR in draft until PyPI serves this exact source archive. Then
-mark it ready, rerun failed source-download checks and merge after checks pass.
-Feedstock CI publishes the conda package automatically. If the source archive
-is rebuilt, update its SHA-256 in both recipes before proceeding.
-
-### Superseded 2.1.0 artifacts
-
-The original artifacts in `dist/2.1.0-pre-audit/` omit the later audit fixes;
-**do not upload them**. The existing `v2.1.0` Git tag is preserved.
+The artifacts in `dist/2.1.0-pre-audit/` and `dist/2.1.1-pre-review/` omit later
+audit fixes; **do not upload them**. Preserve the existing `v2.1.0` and
+`v2.1.1` Git tags.

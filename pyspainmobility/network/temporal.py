@@ -669,6 +669,7 @@ def build_temporal_network(
         Column identifying the observation date. Default is ``'date'``.
     requested_dates : sequence, optional
         Dates to analyse, including any requested days that may be missing.
+        Must contain at least one date when provided.
     observed_dates : sequence, optional
         Dates of successfully observed source days, including known empty days.
         Use either this argument or ``acquisition_manifest``.
@@ -750,7 +751,7 @@ def build_temporal_network(
     if failed_data_policy not in {"error", "exclude"}:
         raise ValueError("failed_data_policy must be either 'error' or 'exclude'.")
 
-    source = _as_lazy_frame(data)
+    source = _as_lazy_frame(data, spec, (time_column,))
     schema = source.collect_schema()
     available = set(schema.names())
     if time_column not in available:
@@ -758,6 +759,8 @@ def build_temporal_network(
 
     requested_provided = requested_dates is not None
     requested = _date_labels(requested_dates, "requested_dates")
+    if requested_provided and not requested:
+        raise ValueError("requested_dates must contain at least one date when provided.")
     if acquisition_manifest is not None:
         manifest_dates, observed = _manifest_dates(
             acquisition_manifest,

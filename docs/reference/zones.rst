@@ -11,6 +11,10 @@ Obtain the geographic context for mobility observations:
 Use :doc:`Mobility <mobility>` to download flows using the same zoning level
 and source version.
 
+Missing name or population metadata does not remove a zone's geometry. If a
+processed GeoJSON was cached using incomplete metadata before this correction,
+regenerate that file from the source tables to recover omitted zones.
+
 .. autoclass:: pyspainmobility.zones.zones.Zones
    :members:
    :undoc-members:

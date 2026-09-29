@@ -1528,6 +1528,25 @@ def test_zone_geodataframe_is_cached_after_first_load(monkeypatch, tmp_path):
     assert first is second
 
 
+@pytest.mark.parametrize("missing_metadata", ["name", "population"])
+def test_zone_geometry_survives_incomplete_metadata_and_cache(monkeypatch, tmp_path, missing_metadata):
+    names = "ID|name\n01001|Town A\n" + ("01002|Town B\n" if missing_metadata != "name" else "")
+    population = "ID|population\n01001|10\n" + ("01002|20\n" if missing_metadata != "population" else "")
+    (tmp_path / "nombres_municipios.csv").write_text(names)
+    (tmp_path / "poblacion_municipios.csv").write_text(population)
+    geometries = gpd.GeoDataFrame({"ID": ["01001", "01002"], "geometry": [Point(0, 0), Point(1, 1)]}, crs="EPSG:4326")
+    original_read = gpd.read_file
+    monkeypatch.setattr(Zones, "_ensure_zoning_files_downloaded", lambda *_: None)
+    monkeypatch.setattr(gpd, "read_file", lambda path, **kwargs: geometries.copy() if str(path).endswith(".shp") else original_read(path, **kwargs))
+    for _ in range(2):
+        result = Zones(output_directory=str(tmp_path)).get_zone_geodataframe()
+        assert result.index.tolist() == ["01001", "01002"]
+        assert result.loc["01002", "geometry"].equals(Point(1, 1))
+        assert pd.isna(result.loc["01002", missing_metadata])
+        other = "population" if missing_metadata == "name" else "name"
+        assert result.loc["01002", other] == ("20" if other == "population" else "Town B")
+
+
 def test_get_zone_relations_version1_returns_sets(monkeypatch, tmp_path):
     out_dir = tmp_path / "z1_relations"
     out_dir.mkdir()

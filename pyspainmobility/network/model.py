@@ -515,6 +515,7 @@ class SparseMobilityNetwork:
         matrix = csr_array(self.adjacency, dtype=np.float64, copy=True)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             raise ValueError("adjacency must be a square two-dimensional matrix.")
+        matrix.check_format(full_check=True)
         if not isinstance(self.metadata, NetworkMetadata):
             raise TypeError("metadata must be a NetworkMetadata instance.")
         if self.provenance is not None and not isinstance(self.provenance, Mapping):
@@ -539,11 +540,13 @@ class SparseMobilityNetwork:
             if not np.array_equal(node_ids, node_index.node_ids):
                 raise ValueError("node_ids and node_index.node_ids must be identical.")
 
+        if not np.all(np.isfinite(matrix.data)) or np.any(matrix.data < 0):
+            raise ValueError("adjacency weights must be finite and non-negative.")
         matrix.sum_duplicates()
         matrix.sort_indices()
         matrix.eliminate_zeros()
-        if not np.all(np.isfinite(matrix.data)) or np.any(matrix.data < 0):
-            raise ValueError("adjacency weights must be finite and non-negative.")
+        if not np.all(np.isfinite(matrix.data)):
+            raise ValueError("Summed adjacency weights must be finite.")
         if not self.metadata.directed:
             difference = (matrix - matrix.T).tocsr()
             if difference.nnz and (

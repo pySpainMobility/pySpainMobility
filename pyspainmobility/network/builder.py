@@ -20,8 +20,22 @@ from .model import (
 ODSource = Union[str, Path, pd.DataFrame, pl.DataFrame, pl.LazyFrame]
 
 
-def _pandas_to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+def _string_node_id(value: object) -> Optional[str]:
+    """Normalize a scalar ID before pandas/Polars dtype inference."""
+    if not pd.api.types.is_scalar(value):
+        raise ValueError("Zone IDs must be scalar values, not collections.")
+    return None if _missing_node_id(value) else str(value).strip()
+
+
+def _pandas_to_polars(
+    frame: pd.DataFrame, identifier_columns: Sequence[str] = ()
+) -> pl.DataFrame:
     """Convert pandas input with a slower fallback when Arrow is optional."""
+    if identifier_columns:
+        frame = frame.copy(deep=False)
+        for name in identifier_columns:
+            if name in frame.columns:
+                frame[name] = frame[name].map(_string_node_id)
     try:
         import pyarrow  # noqa: F401
     except ImportError:
@@ -33,14 +47,20 @@ def _pandas_to_polars(frame: pd.DataFrame) -> pl.DataFrame:
     return pl.from_pandas(frame, include_index=False)
 
 
-def _as_lazy_frame(data: ODSource) -> pl.LazyFrame:
+def _as_lazy_frame(
+    data: ODSource, spec: NetworkSpec, extra_columns: Sequence[str] = ()
+) -> pl.LazyFrame:
     """Normalize supported tabular inputs without materialising Polars input."""
     if isinstance(data, pl.LazyFrame):
         return data
     if isinstance(data, pl.DataFrame):
         return data.lazy()
     if isinstance(data, pd.DataFrame):
-        return _pandas_to_polars(data).lazy()
+        columns = dict.fromkeys((spec.origin, spec.destination, spec.weight, *extra_columns))
+        selected = data.loc[:, [name for name in columns if name in data.columns]]
+        if spec.weight in selected.columns:
+            selected[spec.weight] = pd.to_numeric(selected[spec.weight], errors="coerce")
+        return _pandas_to_polars(selected, (spec.origin, spec.destination)).lazy()
     if isinstance(data, (str, Path)):
         path = Path(data)
         if path.is_dir():
@@ -221,7 +241,7 @@ def build_network(
             raise TypeError("node_index must be a NodeIndex instance.")
         node_ids = node_index.node_ids
 
-    lazy_frame = _as_lazy_frame(data)
+    lazy_frame = _as_lazy_frame(data, spec)
     selected = _selected_od_rows(lazy_frame, spec)
     invalid_rows = selected.filter(_invalid_od_condition()).select(
         pl.len().alias("count")

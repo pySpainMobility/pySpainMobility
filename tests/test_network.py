@@ -1506,6 +1506,64 @@ def test_spatial_mapping_accepts_mixed_scalar_id_types():
     ]
 
 
+def test_pandas_network_inputs_normalize_ids_without_mutating_input():
+    od = pd.DataFrame({
+        "date": ["2024-01-01", "2024-01-01"],
+        "from": [1, "A"], "to": ["A", 1], "trips": ["3", 4.0],
+        "unused": [object(), object()],
+    })
+    original = od.copy(deep=True)
+    spec = NetworkSpec(origin="from", destination="to", weight="trips")
+    expected = [("1", "A", 3.0), ("A", "1", 4.0)]
+    static = build_network(od, spec=spec)
+    temporal = build_temporal_network(od, spec=spec)
+    grouped = aggregate_od_network(od, {1: "1", "A": "A"}, spec=spec)
+    for network in (static, temporal.snapshot("2024-01-01"), grouped):
+        assert network.to_edge_table().rows() == expected
+    pd.testing.assert_frame_equal(od, original)
+    mapping = pd.DataFrame({"source_id": [1, "A"], "target_id": [10, "B"]})
+    for coarse in (aggregate_network(static, mapping), aggregate_od_network(od, mapping, spec=spec)):
+        assert coarse.to_edge_table().rows() == [("10", "B", 3.0), ("B", "10", 4.0)]
+
+
+@pytest.mark.parametrize("missing", [None, np.nan, np.inf])
+def test_pandas_network_normalization_preserves_missing_endpoint_errors(missing):
+    od = pd.DataFrame({"id_origin": [1, missing], "id_destination": ["A", "B"], "n_trips": [1., 2.]})
+    with pytest.raises(ValueError, match="invalid.*endpoint/weight"):
+        build_network(od)
+
+
+@pytest.mark.parametrize("mapping", [{"A": ["X", "Y"]}, pd.DataFrame({"source_id": ["A"], "target_id": [["X", "Y"]]})])
+def test_spatial_mapping_rejects_collection_valued_ids(mapping):
+    network = build_network(pl.DataFrame({"id_origin": ["A"], "id_destination": ["A"], "n_trips": [1.]}))
+    with pytest.raises(ValueError, match="scalar"):
+        aggregate_network(network, mapping)
+
+
+@pytest.mark.parametrize("coverage", ["inferred", "dates", "manifest"])
+def test_temporal_rejects_explicitly_empty_requested_dates(coverage):
+    od = pl.DataFrame({"date": ["2024-01-01"], "id_origin": ["A"], "id_destination": ["B"], "n_trips": [3.]})
+    options = {}
+    if coverage == "dates":
+        options["observed_dates"] = ["2024-01-01"]
+    elif coverage == "manifest":
+        options["acquisition_manifest"] = pl.DataFrame({"date": ["2024-01-01"], "status": ["available"]})
+    with pytest.raises(ValueError, match="requested_dates must contain at least one"):
+        build_temporal_network(od, requested_dates=[], **options)
+
+
+@pytest.mark.parametrize("data, indices, indptr, message", [
+    ([1.], [-1], [0, 1, 1], "index|indices"),
+    ([1.], [2], [0, 1, 1], "index|indices"),
+    ([-1., 2.], [1, 1], [0, 2, 2], "non-negative"),
+])
+def test_network_constructor_rejects_invalid_csr_entries(data, indices, indptr, message):
+    valid = build_network(pl.DataFrame({"id_origin": ["A"], "id_destination": ["B"], "n_trips": [1.]}))
+    malformed = csr_array((data, indices, indptr), shape=(2, 2))
+    with pytest.raises(ValueError, match=message):
+        SparseMobilityNetwork(malformed, valid.node_ids, valid.metadata)
+
+
 @pytest.mark.parametrize("timestamp", ["2024-01-01T12:30", "2024-01-01 12:30", "2024-01-01T12:30Z"])
 def test_temporal_accepts_minute_precision_iso_timestamps(timestamp):
     temporal = build_temporal_network(

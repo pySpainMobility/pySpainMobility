@@ -218,8 +218,8 @@ class Zones:
 
             complete_df = (
                 nombre.set_index("ID")
-                .join(pop.set_index("ID"))
-                .join(zonification.set_index("ID"))
+                .join(pop.set_index("ID"), how="outer")
+                .join(zonification.set_index("ID"), how="outer")
             )
             complete_df = gpd.GeoDataFrame(complete_df, crs="EPSG:4326")
             complete_df.reset_index(inplace=True)

@@ -27,7 +27,7 @@ for features available in your installed version.
 <a id="installation"></a>
 ## Installation
 
-Version 2.1.1 requires **Python 3.10 or newer**.
+Version 2.1.2 requires **Python 3.10 or newer**.
 
 <a id="installation_pip"></a>
 ### pip
