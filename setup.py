@@ -1,7 +1,6 @@
 from setuptools import setup, find_packages
 import io
 
-# Readme TODO
 try:
     with io.open("README.md", encoding="utf-8") as f:
         long_description = f.read()
@@ -10,7 +9,7 @@ except FileNotFoundError:
 
 setup(
     name="pyspainmobility",
-    version="2.1.0",
+    version="2.1.1",
     author="Massimiliano Luca",
     author_email="mluca@fbk.eu",
     description="Library for downloading and processing Spanish mobility data from MITMA",

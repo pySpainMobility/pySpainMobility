@@ -13,6 +13,20 @@ def to_networkx(
     NetworkX is imported only here, so installing pySpainMobility for sparse
     network work does not pull in a graph-object dependency. Install the
     optional adapter with ``pip install pyspainmobility[network]``.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Network to convert, preserving zone IDs, edge weights and isolates.
+    edge_attribute : str
+        Attribute storing each edge's weight. Default is ``'weight'``.
+
+    Returns
+    -------
+    networkx.Graph or networkx.DiGraph
+        Graph matching the source direction, with the flow audit in
+        ``graph.graph['pyspainmobility_audit']``. Geographic node attributes
+        must be attached separately using data from ``Zones``.
     """
     try:
         import networkx as nx

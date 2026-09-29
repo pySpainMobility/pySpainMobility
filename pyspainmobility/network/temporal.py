@@ -130,6 +130,8 @@ def _date_filter_expression(
     column: str, labels: Sequence[str], dtype: object
 ) -> pl.Expr:
     """Filter dates while preserving Parquet partition pruning for Date data."""
+    if not labels:
+        return pl.lit(False)
     if dtype == pl.Date:
         try:
             values = [date.fromisoformat(label) for label in labels]
@@ -415,7 +417,19 @@ class TemporalMobilityNetwork:
         return len(self.coverage.source_dates)
 
     def snapshot(self, when: object) -> SparseMobilityNetwork:
-        """Return the cached or lazily built network for one observed date."""
+        """Return the network for one observed source day.
+
+        Parameters
+        ----------
+        when : str or date-like
+            Observed date, for example ``'2024-01-01'``. A missing source day raises.
+
+        Returns
+        -------
+        SparseMobilityNetwork
+            Daily network with the temporal result's shared node index. Known
+            empty observed days return a zero-flow matrix retaining all nodes.
+        """
         label = _date_label(when)
         cached = self._cache_get(label)
         if cached is not None:
@@ -548,7 +562,18 @@ class TemporalMobilityNetwork:
     def sum_network(
         self, dates: Optional[Sequence[object]] = None
     ) -> SparseMobilityNetwork:
-        """Sum flows across selected observed source dates."""
+        """Sum flows across selected observed source dates.
+
+        Parameters
+        ----------
+        dates : sequence, optional
+            Observed days to sum. None selects all observed source days.
+
+        Returns
+        -------
+        SparseMobilityNetwork
+            Summed flows with the shared node index and selected dates in the audit.
+        """
         return self._aggregate_network(dates, mean=False)
 
     def mean_per_observed_day(
@@ -559,6 +584,17 @@ class TemporalMobilityNetwork:
         Known empty observed dates remain in the denominator.  A requested
         date that is missing or failed in the source manifest raises instead
         of being converted to a zero-flow day.
+
+        Parameters
+        ----------
+        dates : sequence, optional
+            Observed days to average. None selects all observed source days.
+
+        Returns
+        -------
+        SparseMobilityNetwork
+            Summed flows divided by the number of selected observed days,
+            with that denominator and the selected dates recorded in the audit.
         """
         return self._aggregate_network(dates, mean=True)
 
@@ -621,7 +657,45 @@ def build_temporal_network(
     max_cached_snapshots: Optional[int] = 32,
     failed_data_policy: Literal["error", "exclude"] = "error",
 ) -> TemporalMobilityNetwork:
-    """Create a lazy, coverage-aware set of temporal mobility snapshots.
+    """Build daily networks with a shared node order and explicit source coverage.
+
+    Parameters
+    ----------
+    data : str, pathlib.Path, pandas.DataFrame, polars.DataFrame or polars.LazyFrame
+        Processed OD rows or a Parquet file/dataset directory.
+    spec : NetworkSpec, optional
+        Weight column and self-loop policy, as in :func:`build_network`.
+    time_column : str
+        Column identifying the observation date. Default is ``'date'``.
+    requested_dates : sequence, optional
+        Dates to analyse, including any requested days that may be missing.
+    observed_dates : sequence, optional
+        Dates of successfully observed source days, including known empty days.
+        Use either this argument or ``acquisition_manifest``.
+    acquisition_manifest : pandas.DataFrame or polars.DataFrame, optional
+        Source-day record from ``Mobility.get_acquisition_manifest()``. Failed
+        source days are excluded from observed coverage.
+    manifest_date_column, manifest_status_column : str
+        Manifest columns. Defaults are ``'date'`` and ``'status'``.
+    node_ids : sequence, optional
+        Complete, ordered node universe, including isolates.
+    node_index : NodeIndex, optional
+        Shared node order and zoning identity; cannot be combined with ``node_ids``.
+    max_cached_snapshots : int or None
+        Maximum snapshots retained in memory. Default is 32; 0 disables caching,
+        and None leaves the cache unbounded.
+    failed_data_policy : {'error', 'exclude'}
+        Raise if OD rows belong to failed source days, or explicitly remove all
+        such rows. Default is ``'error'``.
+
+    Returns
+    -------
+    TemporalMobilityNetwork
+        Daily snapshots, sums and means over observed days, with source coverage
+        in ``coverage``. Snapshot matrices are built only when requested.
+
+    Notes
+    -----
 
     ``observed_dates`` is deliberately separate from OD rows. Pass the dates
     of source files successfully obtained/parsed to correctly represent an
@@ -640,6 +714,23 @@ def build_temporal_network(
     its rows, the default ``failed_data_policy='error'`` stops the pipeline:
     a partial day must never enter an observed-day average. Pass ``'exclude'``
     to deliberately remove every row for such failed dates.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_temporal_network
+    >>> od = pl.DataFrame({
+    ...     "date": ["2024-01-01", "2024-01-03"],
+    ...     "id_origin": ["A", "A"], "id_destination": ["B", "B"],
+    ...     "n_trips": [3.0, 5.0],
+    ... })
+    >>> temporal = build_temporal_network(
+    ...     od, observed_dates=["2024-01-01", "2024-01-03"],
+    ... )
+    >>> temporal.snapshot("2024-01-01").total_weight
+    3.0
+    >>> temporal.mean_per_observed_day().total_weight
+    4.0
     """
     spec = NetworkSpec() if spec is None else spec
     if not isinstance(spec, NetworkSpec):

@@ -166,28 +166,28 @@ def build_network(
 ) -> SparseMobilityNetwork:
     """Build a directed, weighted CSR network from processed OD observations.
 
-    Repeated OD rows -- including rows separated by time, activity, or social
-    dimensions -- are summed before the matrix is constructed. This is the
-    only safe default for a static flow network.
+    Repeated OD rows, including observations from different dates, hours or
+    categories, are summed for each origin-destination pair. Select the rows
+    needed for your analysis before calling this function.
 
     Parameters
     ----------
-    data
+    data : str, pathlib.Path, pandas.DataFrame, polars.DataFrame or polars.LazyFrame
         A processed OD Parquet path, a pandas/Polars DataFrame, or a Polars
         LazyFrame. It must contain the columns named in ``spec``.
-    spec
-        Construction rules. The MVP supports directed ``sum`` aggregation and
-        retaining or dropping self-loops.
-    node_ids
+    spec : NetworkSpec, optional
+        Weight column and self-loop policy. Defaults to directed sum
+        aggregation with ``weight='n_trips'`` and ``self_loops='keep'``.
+    node_ids : sequence, optional
         Optional complete, ordered node universe. It preserves the same row
         and column positions across independently built networks and includes
         nodes with no observed flows. With ``None``, observed endpoints are
         sorted lexicographically to create a deterministic index.
-    node_index
+    node_index : NodeIndex, optional
         Optional :class:`NodeIndex` replacing ``node_ids``. It associates the
         matrix with a zoning identifier/version and must not be combined with
         ``node_ids``.
-    provenance
+    provenance : mapping, optional
         Optional audit context carried into the immutable network result.
 
     Returns
@@ -196,6 +196,20 @@ def build_network(
         Canonical CSR matrix, node IDs, and an audit trail. Missing or
         non-finite OD values are rejected rather than silently becoming a
         missing flow.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A", "A"], "id_destination": ["B", "B"],
+    ...     "n_trips": [3.0, 2.0],
+    ... })
+    >>> network = build_network(od)
+    >>> network.total_weight
+    5.0
+    >>> network.to_edge_table().rows()
+    [('A', 'B', 5.0)]
     """
     spec = NetworkSpec() if spec is None else spec
     if not isinstance(spec, NetworkSpec):

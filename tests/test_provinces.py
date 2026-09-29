@@ -274,20 +274,47 @@ def test_province_products_work_without_optional_arrow(monkeypatch, tmp_path, ba
     assert pl.read_parquet(next(tmp_path.glob("*.parquet")))["id_origin"].to_list() == ["28"]
 
 
-def test_province_failed_provenance_write_keeps_previous_output(monkeypatch, tmp_path):
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("failure_stage", ["serialize", "publish", "rollback"])
+def test_province_failed_provenance_write_keeps_previous_output(
+    monkeypatch, tmp_path, existing_output, failure_stage
+):
     source = "fecha|periodo|origen|destino|viajes|viajes_km\n{day}|0|D1|D2|3|9\n"
-    mobility, _ = _mobility(monkeypatch, tmp_path, "polars", 2, {"Viajes": source})
-    mobility.get_od_data()
-    saved = next(tmp_path.glob("*.parquet"))
-    previous = saved.read_bytes()
-    previous_audit = Path(str(saved) + ".provenance.json").read_bytes()
+    contents = {"Viajes": source}
+    mobility, _ = _mobility(monkeypatch, tmp_path, "polars", 2, contents)
+    previous = previous_audit = None
+    if existing_output:
+        mobility.get_od_data()
+        saved = next(tmp_path.glob("*.parquet"))
+        previous = saved.read_bytes()
+        previous_audit = Path(str(saved) + ".provenance.json").read_bytes()
+    contents["Viajes"] = source.replace("|3|9", "|7|21")
     def failed_write(*args):
         raise OSError("audit disk failure")
-    monkeypatch.setattr(utils, "write_json_atomic", failed_write)
-    with pytest.raises(OSError, match="audit disk failure"):
+    if failure_stage == "serialize":
+        monkeypatch.setattr(utils, "write_json_atomic", failed_write)
+    else:
+        original_replace = mobility_module.os.replace
+        def failed_publish(src, dst):
+            if str(dst).endswith(".provenance.json"):
+                failed_write()
+            if failure_stage == "rollback" and str(src).endswith(".previous"):
+                raise OSError("rollback disk failure")
+            return original_replace(src, dst)
+        monkeypatch.setattr(mobility_module.os, "replace", failed_publish)
+    with pytest.raises(OSError, match="disk failure"):
         mobility.get_od_data()
-    assert saved.read_bytes() == previous
-    assert Path(str(saved) + ".provenance.json").read_bytes() == previous_audit
+    if existing_output and failure_stage == "rollback":
+        backup, = tmp_path.glob(".*.previous")
+        assert backup.read_bytes() == previous
+        assert Path(str(saved) + ".provenance.json").read_bytes() == previous_audit
+        assert not list(tmp_path.glob(".*.json"))
+        return
+    if existing_output:
+        assert saved.read_bytes() == previous
+        assert Path(str(saved) + ".provenance.json").read_bytes() == previous_audit
+    else:
+        assert not list(tmp_path.glob("*.parquet*"))
     assert not list(tmp_path.glob(".*.parquet*"))
 
 

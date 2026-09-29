@@ -1796,6 +1796,21 @@ def test_province_mapping_integrates_with_network_and_drops_internalized_flows(
     assert province_network.audit()["provenance"]["spatial"]["dropped_target_self_loop_weight"] == pytest.approx(4.0)
 
 
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_od_identifier_normalization_preserves_distinct_non_numeric_dots(tmp_path, backend):
+    source = tmp_path / "identifiers.csv"
+    source.write_text(
+        "fecha|periodo|origen|destino|viajes|viajes_km\n"
+        "20240101|0|FR.01|1.2.3.4.5|3|10\n"
+        "20240101|0|FR01|1.2.3.4.5|4|20\n"
+    )
+    mobility = object.__new__(Mobility)
+    mobility.backend = backend
+    result = mobility._process_single_od_file(str(source), False, False)
+    assert dict(zip(result.id_origin, result.n_trips)) == {"FR.01": 3.0, "FR01": 4.0}
+    assert result.id_destination.tolist() == ["12345", "12345"]
+
+
 def test_polars_daily_scans_align_reordered_measure_columns_and_manifest(tmp_path):
     first = tmp_path / "first.csv"
     second = tmp_path / "second.csv"

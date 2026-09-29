@@ -39,6 +39,12 @@ def _mapping_table(
     target_column: str,
 ) -> pl.DataFrame:
     """Return a validated one-source-to-one-target spatial correspondence."""
+    names = (source_column, target_column)
+    if (
+        any(not isinstance(name, str) or not name.strip() for name in names)
+        or len(set(names)) != 2
+    ):
+        raise ValueError("Spatial mapping column names must be distinct non-empty strings.")
     if isinstance(mapping, MappingABC):
         frame = pl.DataFrame(
             {
@@ -209,6 +215,39 @@ def aggregate_network(
     these are retained by default and reported as ``internalized_weight`` in
     ``network.audit()['provenance']['spatial']``.  Set ``self_loops='drop'``
     only when that loss is intentional and auditable.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Existing network to aggregate.
+    mapping : mapping, pandas.DataFrame, polars.DataFrame or Parquet path
+        One source-to-target pair per source node. A dictionary maps IDs directly;
+        a table uses the columns named below. Every network node must be covered.
+    source_column, target_column : str
+        Mapping columns. Defaults are ``'source_id'`` and ``'target_id'``.
+    target_node_ids : sequence, optional
+        Complete target-node order, including any target isolates.
+    target_node_index : NodeIndex, optional
+        Target-node order and zoning identity; replaces ``target_node_ids``.
+    self_loops : {'keep', 'drop'}
+        Policy for flows within target groups. Default is ``'keep'``.
+
+    Returns
+    -------
+    SparseMobilityNetwork
+        Aggregated network retaining the source weight units and direction,
+        with spatial flow accounting in ``audit()['provenance']['spatial']``.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, aggregate_network
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> grouped = aggregate_network(build_network(od), {"A": "P", "B": "P"})
+    >>> grouped.to_edge_table().rows()
+    [('P', 'P', 5.0)]
     """
     if not isinstance(network, SparseMobilityNetwork):
         raise TypeError("network must be a SparseMobilityNetwork.")
@@ -305,6 +344,40 @@ def aggregate_od_network(
     and aggregation happen in the tabular engine, avoiding an intermediate
     fine-resolution adjacency matrix.  It has the same mapping and flow-audit
     guarantees as :func:`aggregate_network`.
+
+    Parameters
+    ----------
+    data : str, pathlib.Path, pandas.DataFrame, polars.DataFrame or polars.LazyFrame
+        Processed OD table or Parquet input, as in :func:`build_network`.
+    mapping : mapping, pandas.DataFrame, polars.DataFrame or Parquet path
+        One source-to-target pair per source zone, covering every OD endpoint.
+    spec : NetworkSpec, optional
+        Source columns, weight field and source-zone self-loop policy.
+    source_column, target_column : str
+        Mapping columns. Defaults are ``'source_id'`` and ``'target_id'``.
+    target_node_ids : sequence, optional
+        Complete target-node order, including any target isolates.
+    target_node_index : NodeIndex, optional
+        Target-node order and zoning identity; replaces ``target_node_ids``.
+    self_loops : {'keep', 'drop'}
+        Policy for flows within target groups after mapping. Default is ``'keep'``.
+
+    Returns
+    -------
+    SparseMobilityNetwork
+        Directed network of target groups, with spatial flow accounting in
+        ``audit()['provenance']['spatial']``.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import aggregate_od_network
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> grouped = aggregate_od_network(od, {"A": "P", "B": "P"})
+    >>> grouped.to_edge_table().rows()
+    [('P', 'P', 5.0)]
     """
     spec = NetworkSpec() if spec is None else spec
     if not isinstance(spec, NetworkSpec):

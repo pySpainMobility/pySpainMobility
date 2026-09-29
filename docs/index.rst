@@ -18,18 +18,20 @@ Welcome to the documentation for pySpainMobility, an open-source Python package 
    Please report issues or suggestions via our `GitHub repository <https://github.com/pySpainMobility/pySpainMobility/issues>`_.
 
 ********************
-Key Features
+What you can do
 ********************
 
-- 🔍 Access daily mobility datasets (versions 1 & 2) covering:
-   - Municipalities and districts
-   - Greater urban areas
-   - Time periods from February 2020 to 2021 and from 2022 to present
-- 📦 Standardized data structures for consistent analysis
-- 🌐 Built-in spatial tessellation handling
-- ⚡ Polars processing by default, with optional Arrow and pandas backends
-- 🕸️ Sparse OD networks, temporal comparisons, spatial aggregation, and optional NetworkX and Infomap adapters
-- 📈 Designed for research reproducibility and policy applications
+- :doc:`Mobility <reference/mobility>` downloads and processes origin-destination
+  trips, overnight stays and trip-count distributions from MITMA.
+- :doc:`Zones <reference/zones>` provides zone geometries, names, populations
+  and territorial correspondences for interpreting those observations.
+- Both classes support districts and municipalities, plus large urban areas
+  in version 2. Derived provincial products are also available.
+- :doc:`Network analysis <network>` uses the processed flows to build sparse
+  matrices, calculate flow measures and compare periods or spatial groupings.
+
+Start with Mobility and Zones to obtain the data and its geographic context.
+The network helpers support subsequent analysis of those data.
 
 .. note::
    This site follows the repository's ``main`` branch. Source changes made after
@@ -47,17 +49,41 @@ Installation
 
    pip install pyspainmobility
 
-The base package includes the SciPy sparse network representation. Install
-optional adapters only when you need them:
-
-.. code-block:: bash
-
-   pip install 'pyspainmobility[network]'  # NetworkX
-   pip install 'pyspainmobility[infomap]'  # community detection
-
 For a conda environment, create an environment with Python and pip first, then
 use the same pip command. Check the package metadata for the Python version
 required by the release you install.
+
+Download mobility data and zones
+================================
+
+This example downloads one day of municipality-level trips and loads the
+corresponding geometries. It requires access to the MITMA server.
+
+.. code-block:: python
+
+   from pathlib import Path
+   from pyspainmobility import Mobility, Zones
+
+   output = str(Path("mobility_data").resolve())
+   mobility = Mobility(
+       version=2, zones="municipalities", start_date="2024-01-01",
+       output_directory=output,
+   )
+   od = mobility.get_od_data(return_df=True)
+   zones = Zones(version=2, zones="municipalities", output_directory=output)
+   geometries = zones.get_zone_geodataframe()
+
+   print(od.head())
+   print(geometries.head())
+
+- ``od`` is a pandas DataFrame with dates, hours, origin/destination IDs,
+  trip counts and total trip-kilometres. A processed Parquet file is also saved.
+- ``geometries`` is a GeoDataFrame indexed by the zone IDs used in ``od``.
+- For other products and territorial levels, see :doc:`reference/mobility`
+  and :doc:`reference/zones`.
+- When ready to analyse flows as a network, follow the small, runnable examples
+  in :doc:`network`. External algorithm adapters have their own
+  :doc:`installation instructions <reference/network_adapters>`.
 
 **********************
 Citing pySpainMobility
@@ -88,15 +114,15 @@ Documentation Contents
 ************************
 
 .. toctree::
-   :caption: Guides
-   :maxdepth: 2
-
-   network
-
-.. toctree::
-   :caption: API Reference
-   :maxdepth: 2
+   :caption: Core API
+   :maxdepth: 1
 
    reference/mobility
    reference/zones
+
+.. toctree::
+   :caption: Network analysis
+   :maxdepth: 1
+
+   network
    reference/network

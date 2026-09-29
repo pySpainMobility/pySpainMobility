@@ -531,7 +531,9 @@ class Mobility:
         return (
             Mobility._polars_nullable_string(column)
             .str.replace(r"\.0+$", "")
-            .str.replace_all(".", "", literal=True)
+            # Two passes handle overlapping digit pairs, e.g. "1.2.3".
+            .str.replace_all(r"(\d)\.(\d)", "${1}${2}")
+            .str.replace_all(r"(\d)\.(\d)", "${1}${2}")
         )
 
     @staticmethod
@@ -1771,6 +1773,8 @@ class Mobility:
         ) as temporary:
             temporary_path = temporary.name
         provenance_path = temporary_path + ".json"
+        previous_path = temporary_path + ".previous"
+        publication_incomplete = False
         try:
             if pl is not None and isinstance(df, pl.DataFrame):
                 df.write_parquet(temporary_path)
@@ -1791,12 +1795,27 @@ class Mobility:
                 utils.write_json_atomic(
                     self._output_provenance(m_type), provenance_path
                 )
+                # Preserve the old file without copying its data for rollback.
+                if os.path.exists(output_file):
+                    os.link(output_file, previous_path)
             os.replace(temporary_path, output_file)
+            publication_incomplete = True
             if self.zones == "provinces":
-                os.replace(provenance_path, output_file + ".provenance.json")
+                try:
+                    os.replace(provenance_path, output_file + ".provenance.json")
+                except OSError:
+                    if os.path.exists(previous_path):
+                        os.replace(previous_path, output_file)
+                    else:
+                        os.unlink(output_file)
+                    raise
+            publication_incomplete = False
         finally:
-            for path in (temporary_path, provenance_path):
-                if os.path.exists(path):
+            for path in (temporary_path, provenance_path, previous_path):
+                # Keep the recovery copy if rollback also fails.
+                if os.path.exists(path) and not (
+                    path == previous_path and publication_incomplete
+                ):
                     os.unlink(path)
         print('Parquet file generated successfully at ', output_file)
 

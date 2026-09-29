@@ -159,12 +159,43 @@ def _stable_sparse_cosine(left_matrix, right_matrix) -> float:
 
 
 def node_strengths(network: SparseMobilityNetwork) -> pl.DataFrame:
-    """Return weighted row/column strengths for every node.
+    """Calculate the flow sent and received by each zone.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Network whose edge weights will be summed. With ``weight='n_trips'``,
+        the resulting strengths are measured in trips.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per node in matrix order, including isolates:
+
+        - ``node_id``: zone identifier.
+        - ``out_strength``: sum of outgoing weights (matrix row sum).
+        - ``in_strength``: sum of incoming weights (matrix column sum).
+        - ``total_strength``: outgoing plus incoming strength for directed
+          networks; incident weight for undirected networks.
+
+    Notes
+    -----
+    A directed self-loop contributes once to each of in- and out-strength.
 
     For undirected networks ``total_strength`` counts a self-loop once, as one
     mobility flow incident on that zone. NetworkX's weighted graph degree
     counts an undirected self-loop twice; callers needing that graph-theoretic
     convention should use the NetworkX adapter explicitly.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, node_strengths
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> node_strengths(build_network(od)).rows()
+    [('A', 5.0, 0.0, 5.0), ('B', 0.0, 5.0, 5.0)]
     """
     if not isinstance(network, SparseMobilityNetwork):
         raise TypeError("network must be a SparseMobilityNetwork instance.")
@@ -190,8 +221,33 @@ def destination_similarity(
     """Return per-origin cosine similarity between destination flow profiles.
 
     A node with no outgoing flow in either network has similarity 1.0; a node
-    that is inactive in only one network has similarity 0.0. This makes the
-    convention explicit instead of silently excluding zero-strength origins.
+    that is inactive in only one network has similarity 0.0.
+
+    Parameters
+    ----------
+    left, right : SparseMobilityNetwork
+        Networks with compatible node universes, zoning metadata, direction,
+        weight field and normalization. Their node order is aligned automatically.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per origin in the first network's node order:
+
+        - ``node_id``: origin zone identifier.
+        - ``destination_cosine_similarity``: cosine of the two outgoing weight
+          profiles, accounting for the empty-profile conventions above.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, destination_similarity
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> network = build_network(od)
+    >>> destination_similarity(network, network).rows()
+    [('A', 1.0), ('B', 1.0)]
     """
     left, right = _aligned_pair(left, right)
     left_matrix = left.adjacency
@@ -208,10 +264,39 @@ def destination_similarity(
 def edge_changes(
     left: SparseMobilityNetwork, right: SparseMobilityNetwork
 ) -> pl.DataFrame:
-    """Return added, removed, and weight-changed logical edges.
+    """Inspect weight changes for individual origin-destination connections.
 
-    The result contains only the union of non-zero edges, never a dense
-    node-by-node table. ``delta_weight`` is ``right_weight - left_weight``.
+    Parameters
+    ----------
+    left, right : SparseMobilityNetwork
+        Networks with compatible node universes, zoning metadata, direction,
+        weight field and normalization. Their node order is aligned automatically.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row for each connection present in either network, sorted by IDs:
+
+        - ``id_origin``, ``id_destination``: endpoint zone IDs.
+        - ``left_weight``, ``right_weight``: weights, with absent edges set to zero.
+        - ``delta_weight``: ``right_weight - left_weight``.
+        - ``change``: ``'added'``, ``'removed'``, ``'increased'``, ``'decreased'``
+          or ``'unchanged'``.
+
+        Unchanged connections are included. Undirected pairs appear once;
+        zero-to-zero pairs are omitted.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, edge_changes
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> first = build_network(od)
+    >>> second = build_network(od.with_columns(pl.lit(7.0).alias("n_trips")))
+    >>> edge_changes(first, second).select("delta_weight", "change").rows()
+    [(2.0, 'increased')]
     """
     left, right = _aligned_pair(left, right)
     keys = ["id_origin", "id_destination"]
@@ -259,7 +344,42 @@ def compare_networks(
     left_label: Optional[object] = None,
     right_label: Optional[object] = None,
 ) -> NetworkComparison:
-    """Compare two aligned weighted networks without densifying."""
+    """Summarize overlap, similarity and flow changes between two networks.
+
+    Parameters
+    ----------
+    left, right : SparseMobilityNetwork
+        Networks with compatible node universes, zoning metadata, direction,
+        weight field and normalization. Their node order is aligned automatically.
+    left_label, right_label : object, optional
+        Labels recorded in the result, such as the dates being compared.
+
+    Returns
+    -------
+    NetworkComparison
+        Connection counts, edge and weighted Jaccard similarity, cosine
+        similarity, and increases/decreases in flow. ``audit()`` returns a
+        serializable dictionary. See the flow-measures reference for definitions.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, compare_networks
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A"], "id_destination": ["B"], "n_trips": [5.0],
+    ... })
+    >>> first = build_network(od)
+    >>> second = build_network(od.with_columns(pl.lit(7.0).alias("n_trips")))
+    >>> result = compare_networks(first, second)
+    >>> result.flow_increase, result.flow_decrease
+    (2.0, 0.0)
+    >>> result.shared_edge_count
+    1
+    >>> round(result.weighted_jaccard, 2)
+    0.71
+    >>> result.cosine_similarity
+    1.0
+    """
     left, right = _aligned_pair(left, right)
     left_matrix = _comparison_matrix(left)
     right_matrix = _comparison_matrix(right)

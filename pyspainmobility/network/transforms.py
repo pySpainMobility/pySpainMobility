@@ -35,6 +35,30 @@ def symmetrize_network(
     Self-loops are preserved once under every rule. Provenance records both
     logical edge weight and stored symmetric-matrix weight, avoiding accidental
     double counting of off-diagonal edges.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Directed network to transform.
+    method : {'sum', 'mean', 'max', 'mutual'}
+        Rule for combining the two directions, as defined above. Default is ``'sum'``.
+
+    Returns
+    -------
+    SparseMobilityNetwork
+        Undirected network with the same node index. ``total_weight`` and
+        ``to_edge_table()`` count each undirected connection once.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from pyspainmobility import build_network, symmetrize_network
+    >>> od = pl.DataFrame({
+    ...     "id_origin": ["A", "B"], "id_destination": ["B", "A"],
+    ...     "n_trips": [3.0, 2.0],
+    ... })
+    >>> symmetrize_network(build_network(od), method="sum").to_edge_table().rows()
+    [('A', 'B', 5.0)]
     """
     if not isinstance(network, SparseMobilityNetwork):
         raise TypeError("network must be a SparseMobilityNetwork instance.")

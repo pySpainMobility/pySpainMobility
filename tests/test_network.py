@@ -1354,6 +1354,42 @@ def test_spatial_aggregation_uses_custom_public_column_names_without_collision()
     ]
 
 
+@pytest.mark.parametrize("aggregate", [aggregate_network, aggregate_od_network])
+def test_spatial_mapping_rejects_colliding_column_names(aggregate):
+    od = pl.DataFrame({"id_origin": ["A"], "id_destination": ["B"], "n_trips": [2.0]})
+    source = build_network(od) if aggregate is aggregate_network else od
+    with pytest.raises(ValueError, match="distinct"):
+        aggregate(
+            source, {"A": "B", "B": "A"}, source_column="zone", target_column="zone"
+        )
+
+
+@pytest.mark.parametrize("names", [
+    ("id", "id", "weight"), ("id", "dst", "id"), ("src", "id", "id"),
+])
+def test_edge_table_rejects_colliding_column_names(names):
+    network = build_network(
+        pl.DataFrame({"id_origin": ["A"], "id_destination": ["B"], "n_trips": [2.0]})
+    )
+    with pytest.raises(ValueError, match="distinct"):
+        network.to_edge_table(*names)
+
+
+@pytest.mark.parametrize("scale", [1e-12, 1e-100])
+@pytest.mark.parametrize("contract", ["represented weight", "symmetric"])
+def test_network_validation_is_relative_to_weight_scale(scale, contract):
+    network = build_network(
+        pl.DataFrame({"id_origin": ["A"], "id_destination": ["B"], "n_trips": [scale]})
+    )
+    metadata = (
+        replace(network.metadata, represented_weight=0.0)
+        if contract == "represented weight"
+        else replace(network.metadata, directed=False, represented_weight=scale / 2)
+    )
+    with pytest.raises(ValueError, match=contract):
+        SparseMobilityNetwork(network.adjacency, network.node_ids, metadata)
+
+
 def test_audit_retains_initial_flow_loss_after_spatial_aggregation():
     source = build_network(
         pl.DataFrame(

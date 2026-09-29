@@ -129,6 +129,23 @@ class NodeIndex:
     ``node_ids[i]`` identifies row and column ``i``.  Zoning metadata is
     optional for backwards compatibility, but when provided it is checked
     before aligning or comparing networks.
+
+    Parameters
+    ----------
+    node_ids : sequence
+        Unique, non-missing zone IDs in the desired matrix order. IDs are
+        converted to strings; include zones with no flows to retain isolates.
+    zoning_id : str, optional
+        Name identifying the zoning system used by these IDs.
+    zoning_version : str, optional
+        Version of that zoning system.
+
+    Examples
+    --------
+    >>> from pyspainmobility import NodeIndex
+    >>> nodes = NodeIndex(["A", "B", "C"], zoning_id="example", zoning_version="v1")
+    >>> nodes.positions()["B"]
+    1
     """
 
     node_ids: Sequence[object]
@@ -228,10 +245,33 @@ class NodeIndex:
 class NetworkSpec:
     """Rules used to turn an OD table into a network.
 
-    Only a directed, sum-aggregated network is implemented in the first
-    release. Keeping these decisions in a value object makes later temporal,
-    spatial, and undirected variants explicit instead of silently changing
-    the meaning of an adjacency matrix.
+    Pass these options to :func:`~pyspainmobility.network.builder.build_network`
+    or :func:`~pyspainmobility.network.temporal.build_temporal_network`.
+
+    Parameters
+    ----------
+    origin : str
+        Origin ID column. Default is ``'id_origin'``.
+    destination : str
+        Destination ID column. Default is ``'id_destination'``.
+    weight : str
+        Additive flow column. Default is ``'n_trips'``. For total
+        trip-kilometres, use ``'trips_total_length_km'``.
+    directed : bool
+        Must be True. After construction, use
+        :func:`~pyspainmobility.network.transforms.symmetrize_network`
+        to combine directions with an explicit rule.
+    aggregation : str
+        Must be ``'sum'``; repeated OD observations are added together.
+    self_loops : {'keep', 'drop'}
+        Retain or exclude flows within the same zone. Default is ``'keep'``.
+
+    Examples
+    --------
+    >>> from pyspainmobility import NetworkSpec
+    >>> spec = NetworkSpec(weight="n_trips", self_loops="drop")
+    >>> spec.self_loops
+    'drop'
     """
 
     origin: str = "id_origin"
@@ -445,6 +485,21 @@ class SparseMobilityNetwork:
     ``adjacency``. The IDs are sorted lexicographically when inferred from
     the OD data, or retain the caller-provided order when ``node_ids`` is
     supplied to :func:`build_network`.
+
+    Attributes
+    ----------
+    adjacency : scipy.sparse.csr_array
+        Read-only matrix of edge weights, with origins as rows and destinations
+        as columns. Keep this representation sparse for large networks.
+    node_ids : numpy.ndarray
+        Zone IDs in matrix order.
+    metadata : NetworkMetadata
+        Weight field, construction rules and represented/excluded flow totals.
+    provenance : mapping
+        Immutable context and transformation history; ``audit()`` returns a
+        serializable description.
+    node_index : NodeIndex
+        Shared node order and optional zoning identity.
     """
 
     adjacency: csr_array
@@ -491,9 +546,9 @@ class SparseMobilityNetwork:
             raise ValueError("adjacency weights must be finite and non-negative.")
         if not self.metadata.directed:
             difference = (matrix - matrix.T).tocsr()
-            if difference.nnz and not np.allclose(
-                difference.data, 0.0, rtol=1e-12, atol=1e-9
-            ):
+            if difference.nnz and (
+                abs(difference) > matrix.maximum(matrix.T) * 1e-12
+            ).nnz:
                 raise ValueError("undirected adjacency must be symmetric.")
             # Sparse projection can change summation order in the two matrix
             # triangles. Canonicalise harmless round-off before freezing CSR.
@@ -516,7 +571,7 @@ class SparseMobilityNetwork:
         if self.metadata.represented_edge_count != logical_count:
             raise ValueError("metadata edge count does not match adjacency.")
         if not np.isclose(
-            self.metadata.represented_weight, logical_weight, rtol=1e-12, atol=1e-9
+            self.metadata.represented_weight, logical_weight, rtol=1e-12, atol=0.0
         ):
             raise ValueError("metadata represented weight does not match adjacency.")
         matrix = _read_only_csr(matrix)
@@ -576,7 +631,28 @@ class SparseMobilityNetwork:
         *,
         sort: bool = True,
     ) -> pl.DataFrame:
-        """Return the sparse non-zero entries as a Polars edge table."""
+        """Return one row per non-zero connection as a Polars DataFrame.
+
+        Parameters
+        ----------
+        origin, destination, weight : str
+            Output column names. Defaults are ``'id_origin'``,
+            ``'id_destination'`` and ``'weight'``; names must be distinct.
+        sort : bool
+            Sort by origin and destination IDs. Default is True.
+
+        Returns
+        -------
+        polars.DataFrame
+            Zone IDs and edge weights. Undirected pairs appear once, with
+            endpoints ordered by their matrix positions.
+        """
+        names = (origin, destination, weight)
+        if (
+            any(not isinstance(name, str) or not name.strip() for name in names)
+            or len(set(names)) != 3
+        ):
+            raise ValueError("Edge table column names must be distinct non-empty strings.")
         matrix = (
             self.adjacency
             if self.metadata.directed

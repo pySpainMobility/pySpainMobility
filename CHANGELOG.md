@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [2.1.1] - 2026-09-29
+
+### Fixed
+- Preserve non-numeric dots in identifiers on the Polars backend, matching
+  pandas and avoiding accidental merging of distinct zones.
+- Reject colliding source/target mapping columns and edge-table export columns
+  before they can silently overwrite identifiers or weights.
+- Validate undirected symmetry and represented weights relative to each flow's
+  scale, including tiny positive weights.
+- Support temporal aggregation with no retained flows on minimum Polars
+  versions; genuinely observed empty days remain in the mean denominator.
+- Restore the previous provincial Parquet output if publishing its provenance
+  JSON fails, without copying the data file. Document abrupt-interruption limits.
+
+### Maintenance
+- Run core tests against minimum supported dependency versions in CI.
+- Organize documentation around Mobility and Zones, with runnable network
+  examples, defined flow measures, task-specific API pages and explicit credit
+  for external algorithm adapters. Match their parameter/result descriptions
+  to the existing NumPy-style core API documentation.
+- Align the README with the core-first documentation and replace examples
+  requiring undefined variables with a small runnable network example.
+
 ## [2.1.0] - 2026-09-27
 
 ### Added

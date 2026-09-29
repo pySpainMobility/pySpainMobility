@@ -49,6 +49,16 @@ def to_infomap(network: SparseMobilityNetwork) -> Any:
 
     The adapter passes the canonical zone IDs as Infomap node names, including
     explicit isolates. No edge-table or NetworkX materialisation is involved.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Network to convert, preserving its direction, weights and zone IDs.
+
+    Returns
+    -------
+    infomap.Network
+        Infomap's native network object, ready for use with its Python API.
     """
     if not isinstance(network, SparseMobilityNetwork):
         raise TypeError("network must be a SparseMobilityNetwork instance.")
@@ -96,6 +106,28 @@ def run_infomap(
     ``seed`` and ``num_trials`` are retained in the returned provenance to make
     stochastic optimisation repeatable. The network direction is fixed by the
     canonical mobility contract and cannot be overridden here.
+
+    Parameters
+    ----------
+    network : SparseMobilityNetwork
+        Mobility network supplied to Infomap.
+    seed : int
+        Infomap's random seed. Default is 123.
+    num_trials : int
+        Number of optimization trials. Must be positive; default is 1.
+    two_level : bool
+        Restrict the partition to two levels when True. Default is False.
+    markov_time : float, optional
+        Positive Infomap Markov time controlling the flow model's scale.
+    **options
+        Additional Infomap keyword options. Direction and flow-model overrides
+        are rejected to preserve the source network's interpretation.
+
+    Returns
+    -------
+    CommunityPartition
+        Zone-to-module assignments, module hierarchy, algorithm metrics and
+        recorded run parameters. ``communities()`` groups zone IDs by module.
     """
     forbidden = {"directed", "flow_model", "args", "options"} & set(options)
     if forbidden:

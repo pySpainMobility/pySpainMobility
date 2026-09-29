@@ -21,12 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Check version sync (pip/conda)
         run: |
           python scripts/check_version_sync.py
       - name: Install docs dependencies
         run: |
-          pip install .[docs]
+          pip install '.[docs]' pytest
+      - name: Check API examples
+        run: python -m pytest -q --doctest-modules pyspainmobility/network
+      - name: Check network guide examples
+        run: sphinx-build -b doctest -D doctest_test_doctest_blocks= docs _build/doctest
       - name: Sphinx build
         run: |
           sphinx-build -b html docs _build/html

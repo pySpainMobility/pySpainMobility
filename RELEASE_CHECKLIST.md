@@ -40,23 +40,42 @@ Use this checklist for every release so pip and conda stay aligned.
     - Confirm latest `documentation` workflow finished with deploy success
     - Open `https://pyspainmobility.github.io/pySpainMobility/`
 
-## Prepared release 2.1.0
+## Release 2.1.1: manual PyPI publication
 
-The local artifacts in `dist/2.1.0/` have passed `twine check`. From the
-repository root, upload them with:
+The corrected artifacts are in `dist/2.1.1/`. The source archive and wheel
+match the audited code; their metadata passed `twine check`.
 
-```sh
-.venv/bin/python -m twine upload --username __token__ dist/2.1.0/pyspainmobility-2.1.0.tar.gz dist/2.1.0/pyspainmobility-2.1.0-py3-none-any.whl
-```
-
-Enter the PyPI token when Twine asks for the password; do not put it in the
-command or commit it to the repository. Upload these exact artifacts without
-rebuilding: the conda recipe uses their source archive's SHA-256.
-
-- Source SHA-256: `2f08fce67698ba533598a89ba6953f1f7d234fb312ca6cf79eac12b09a207e68`.
-- Wheel SHA-256: `b8ef762f43ed8ca1564427a86e2723f06c380ed5117a608e439f923f8ded587d`.
+- Development suite: 312 passed; two opt-in live tests skipped in this run.
+- Installed wheel with current and minimum dependencies: 309 core tests
+  passed in each environment; optional adapters excluded from those runs.
+- Clean base installation: four tests and 11 API examples passed without
+  Arrow, Dask, NetworkX or Infomap; `pip check` passed.
+- Documentation: strict HTML build, 11 API examples and seven guide examples
+  passed. The README's offline network example also ran successfully.
+- Source SHA-256: `b6d59af5be397a1016839e87afad5eb278a9c551d6e7f431083115132099cae8`.
+- Wheel SHA-256: `467e00aae97568119425c82bd71b5e5e7afdc5e299a5d0995113cf518b0cb4d4`.
 - Conda-forge update: [PR #8](https://github.com/conda-forge/pyspainmobility-feedstock/pull/8).
 
-After PyPI exposes version 2.1.0, mark the conda PR ready, rerun any failed
-source-download checks, and merge only after its checks pass. Feedstock CI
-then publishes the conda package; a local `anaconda upload` is not needed.
+From the repository directory, upload the verified artifacts:
+
+```bash
+.venv/bin/python -m twine upload --username __token__ \
+  dist/2.1.1/pyspainmobility-2.1.1-py3-none-any.whl \
+  dist/2.1.1/pyspainmobility-2.1.1.tar.gz
+```
+
+Enter your PyPI token at the password prompt. Confirm the release exists:
+
+```bash
+.venv/bin/python -c "import json,urllib.request as u;print(json.load(u.urlopen('https://pypi.org/pypi/pyspainmobility/2.1.1/json'))['info']['version'])"
+```
+
+Keep the conda PR in draft until PyPI serves this exact source archive. Then
+mark it ready, rerun failed source-download checks and merge after checks pass.
+Feedstock CI publishes the conda package automatically. If the source archive
+is rebuilt, update its SHA-256 in both recipes before proceeding.
+
+### Superseded 2.1.0 artifacts
+
+The original artifacts in `dist/2.1.0-pre-audit/` omit the later audit fixes;
+**do not upload them**. The existing `v2.1.0` Git tag is preserved.

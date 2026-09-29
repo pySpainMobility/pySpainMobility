@@ -1,135 +1,243 @@
-Mobility networks
-=================
+Network examples
+================
 
-The network module turns processed origin-destination (OD) rows into a SciPy
-CSR matrix. Rows and columns share a stable :class:`~pyspainmobility.network.model.NodeIndex`.
-NetworkX and Infomap are optional adapters; the sparse matrix is the main
-representation.
+Use :doc:`Mobility <reference/mobility>` to obtain processed flows and
+:doc:`Zones <reference/zones>` to understand their geographic IDs. The network
+helpers then let you:
+
+- Build a directed, weighted network from origin-destination (OD) rows.
+- Measure how much flow each zone sends and receives.
+- Compare observed days and calculate averages with explicit source coverage.
+- Aggregate zones using a verified territorial mapping.
+
+The examples below use a small table and require no downloads. Run them in
+order; later examples reuse ``od`` and ``network``. They work with the base
+installation. The :doc:`network API reference <reference/network>` documents
+parameters and results for each function.
 
 Build a network
 ---------------
 
-Repeated rows for an origin-destination pair are summed, including rows from
-different hours or categories. Filter the OD table first when you need a
-particular period, hour, or category. Construction is directed; choose whether
-to keep or drop self-loops explicitly.
+Repeated observations for the same origin-destination pair are summed.
+Here A sends 3 + 2 = 5 trips to B, and B sends 4 trips to A.
 
-.. code-block:: python
+.. testcode:: network-examples
 
    import polars as pl
-   from pyspainmobility import NodeIndex, NetworkSpec, build_network
+   from pyspainmobility import build_network
 
    od = pl.DataFrame({
        "date": ["2024-01-01", "2024-01-01", "2024-01-03"],
+       "hour": [0, 1, 0],
        "id_origin": ["A", "A", "B"],
        "id_destination": ["B", "B", "A"],
        "n_trips": [3.0, 2.0, 4.0],
+       "trips_total_length_km": [30.0, 20.0, 40.0],
    })
-   nodes = NodeIndex(["A", "B", "C"], zoning_id="example", zoning_version="v1")
-   network = build_network(
-       od,
-       spec=NetworkSpec(weight="n_trips", self_loops="keep"),
-       node_index=nodes,
-   )
+   network = build_network(od)
+   print(network.node_ids.tolist())
+   print(network.number_of_edges)
+   print(network.total_weight)
 
-   print(network.adjacency)  # A -> B has weight 5; C remains an isolate
-   print(network.to_edge_table())
-   print(network.audit())
+.. testoutput:: network-examples
 
-The node index preserves the same matrix ordering across periods and includes
-isolates. A comparison rejects incompatible zoning identities, weight fields,
-or normalizations. To form an undirected network, call
-:func:`~pyspainmobility.network.transforms.symmetrize_network` with a named
-rule such as ``sum`` or ``mutual``.
+   ['A', 'B']
+   2
+   9.0
+
+- ``network.adjacency`` is a SciPy sparse matrix: rows are origins and columns
+  are destinations. ``network.node_ids`` identifies their order.
+- ``network.to_edge_table()`` returns origin, destination and weight columns
+  as a Polars DataFrame.
+- The default weight is ``n_trips`` and self-loops (flows within one zone) are
+  retained. ``network.audit()`` reports construction rules and flow totals.
+- A static network sums all supplied dates, hours and categories. Select the
+  observations you need before building it.
+
+For example, retain only hour 0 on 1 January:
+
+.. testcode:: network-examples
+
+   from pyspainmobility import select_od
+
+   selected = select_od(od, filters={"date": "2024-01-01", "hour": [0]})
+   morning = build_network(selected)
+   print(morning.total_weight)
+
+.. testoutput:: network-examples
+
+   3.0
+
+With downloaded data, pass the DataFrame returned by
+``mobility.get_od_data(return_df=True)`` or the path to its processed Parquet
+file directly to ``build_network()``.
+
+Measure flow by zone
+--------------------
+
+Strength is the sum of incident edge weights. Because this example uses
+``n_trips``, the values below count trips.
+
+.. testcode:: network-examples
+
+   from pyspainmobility import node_strengths
+
+   strengths = node_strengths(network)
+   print(strengths.select("node_id", "out_strength", "in_strength").rows())
+
+.. testoutput:: network-examples
+
+   [('A', 5.0, 4.0), ('B', 4.0, 5.0)]
+
+.. list-table:: Columns returned by ``node_strengths()``
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Column
+     - Meaning for a directed trip network
+   * - ``node_id``
+     - Zone identifier.
+   * - ``out_strength``
+     - Sum of trips departing from the zone.
+   * - ``in_strength``
+     - Sum of trips arriving in the zone.
+   * - ``total_strength``
+     - Out-strength plus in-strength. An internal flow contributes to both.
+
+These are weighted flow totals. If you build a network with
+``NetworkSpec(weight="trips_total_length_km")``, the strengths are total
+trip-kilometres. For an undirected network, ``total_strength`` is the incident
+weight, counting each self-loop once.
 
 Compare observed days
 ---------------------
 
-Use an acquisition manifest from :meth:`~pyspainmobility.mobility.mobility.Mobility.get_acquisition_manifest`
-when working with downloaded data. It distinguishes a missing or failed file
-from an observed day with no OD rows. When a manifest is unavailable, pass
-``observed_dates`` explicitly; otherwise availability can only be inferred
-from OD rows.
+An observed day with no retained flows and a missing source day have different
+meanings. Specify which days were observed when constructing temporal networks.
+Here, 1 and 3 January were observed; 2 January was missing.
 
-.. code-block:: python
+.. testcode:: network-examples
 
    from pyspainmobility import build_temporal_network
 
    temporal = build_temporal_network(
        od,
-       node_index=nodes,
        requested_dates=["2024-01-01", "2024-01-02", "2024-01-03"],
        observed_dates=["2024-01-01", "2024-01-03"],
    )
-   print(temporal.coverage.missing_source_dates)  # ('2024-01-02',)
-   print(temporal.snapshot("2024-01-01").to_edge_table())
-   print(temporal.compare_snapshots("2024-01-01", "2024-01-03").audit())
-   print(temporal.mean_per_observed_day().audit())
+   first = temporal.snapshot("2024-01-01")
+   last = temporal.snapshot("2024-01-03")
+   print(temporal.coverage.missing_source_dates)
+   print(temporal.sum_network().total_weight)
+   print(temporal.mean_per_observed_day().total_weight)
 
-The mean divides by two observed days in this example. A missing day is not
-treated as zero flow. Snapshots use one shared node index and a bounded cache.
-For long periods with frequent day queries, use a date-partitioned Parquet
-dataset so Polars can prune other days.
+.. testoutput:: network-examples
 
-Spatial aggregation and metrics
+   ('2024-01-02',)
+   9.0
+   4.5
+
+The mean is 9 trips divided by two observed days. A genuinely observed empty
+day would count in the denominator; the missing day does not.
+
+For downloaded OD data, use the source manifest from Mobility:
+
+.. code-block:: python
+
+   from pyspainmobility import Mobility, build_temporal_network
+
+   mobility = Mobility(version=2, zones="municipalities", start_date="2024-01-01")
+   downloaded_od = mobility.get_od_data(return_df=True)
+   downloaded_temporal = build_temporal_network(
+       downloaded_od, acquisition_manifest=mobility.get_acquisition_manifest("Viajes")
+   )
+
+Here ``downloaded_od`` is the DataFrame returned by that same Mobility
+request. For version 1, the OD manifest name is ``"maestra1"``. Without a
+manifest or ``observed_dates``, coverage is inferred from data rows.
+
+To inspect changes between the two example days:
+
+.. testcode:: network-examples
+
+   from pyspainmobility import compare_networks, edge_changes
+
+   comparison = compare_networks(first, last)
+   print(comparison.added_edge_count, comparison.removed_edge_count)
+   print(edge_changes(first, last).select(
+       "id_origin", "id_destination", "delta_weight", "change"
+   ).rows())
+
+.. testoutput:: network-examples
+
+   1 1
+   [('A', 'B', -5.0, 'removed'), ('B', 'A', 4.0, 'added')]
+
+- ``compare_networks()`` summarises shared, added and removed connections,
+  similarity and changes in total flow.
+- ``edge_changes()`` reports individual OD pairs, including unchanged pairs.
+  Its delta is the second network's weight minus the first network's weight.
+- ``destination_similarity()`` measures the similarity of each origin's
+  destination profile. See :doc:`reference/network_metrics` for definitions,
+  output columns and empty-network conventions.
+- Comparisons require the same node universe, direction, weight field and
+  normalization. Temporal snapshots already share one node index.
+
+Aggregate zones
+---------------
+
+A mapping must assign each source zone to exactly one target area. Mapping
+both A and B to P makes all nine trips internal to P:
+
+.. testcode:: network-examples
+
+   from pyspainmobility import aggregate_od_network
+
+   grouped = aggregate_od_network(od, {"A": "P", "B": "P"})
+   print(grouped.to_edge_table().rows())
+   print(grouped.total_weight)
+
+.. testoutput:: network-examples
+
+   [('P', 'P', 9.0)]
+   9.0
+
+- Internal flows are kept as self-loops. ``self_loops="drop"`` removes them
+  and records the excluded weight in ``grouped.audit()``.
+- Use ``aggregate_od_network()`` when the OD table is available, or
+  ``aggregate_network()`` when you already have a sparse network.
+- :meth:`~pyspainmobility.zones.zones.Zones.get_network_mapping` and
+  :meth:`~pyspainmobility.zones.zones.Zones.get_province_mapping` provide checked
+  territorial correspondences. Ambiguous or incomplete strict mappings raise.
+- For province-level data and geometries, start with
+  ``Mobility(zones="provinces")`` and ``Zones(zones="provinces")``. Their
+  :doc:`Mobility <reference/mobility>` and :doc:`Zones <reference/zones>` pages
+  explain derived provinces and excluded territories.
+
+Choose node order and direction
 -------------------------------
 
-An exact mapping assigning each source node to one target group permits
-flow-preserving aggregation. Source-zone flows that become internal to a
-target group appear as self-loops by default. The audit records any flow
-removed by ``self_loops="drop"``.
+For independently built networks, provide the same node index to preserve
+matrix order and include zones with no observed flows:
 
-.. code-block:: python
+.. testcode:: network-examples
 
-   from pyspainmobility import aggregate_network, node_strengths
+   from pyspainmobility import NodeIndex, NetworkSpec, symmetrize_network
 
-   grouped = aggregate_network(network, {"A": "P", "B": "P", "C": "Q"})
-   print(grouped.audit()["provenance"]["spatial"])
-   print(node_strengths(network))
+   nodes = NodeIndex(["A", "B", "C"], zoning_id="example", zoning_version="v1")
+   ordered = build_network(od, node_index=nodes)
+   print(ordered.node_ids.tolist())
+   print(node_strengths(ordered).filter(pl.col("node_id") == "C").rows())
 
-For an OD table that is still available, use
-:func:`~pyspainmobility.network.spatial.aggregate_od_network` to aggregate
-before building the fine-resolution matrix. :class:`~pyspainmobility.zones.zones.Zones`
-can provide a checked mapping to province codes with ``get_province_mapping()``.
-The helper uses the selected zoning level and supports version-1 municipality
-sets. A zone spanning several municipalities is accepted when they all belong
-to one province; missing codes and zones spanning multiple provinces raise.
-Code validation checks the five-digit format and province prefix 01–52,
-including Ceuta and Melilla, without checking historical municipality registries.
-Fractional zone splitting and automatic conversion between different zoning
-versions are not supported.
+.. testoutput:: network-examples
 
-For direct province-level input, use ``Mobility(zones="provinces")``. It sums
-district-source OD, overnight-stay and trip-count products, retaining dates,
-hours, selected categories and internal flows. Source days are validated
-before the geographic transformation. Version 1 has no overnight-stay product.
-Zones lacking a unique province are explicitly excluded: returned DataFrame
-``attrs``, acquisition manifests and adjacent ``*.parquet.provenance.json``
-files report excluded rows and additive measures. Files are labelled
-``provinces_derived`` and remain compatible with the existing network builders.
+   ['A', 'B', 'C']
+   [('C', 0.0, 0.0, 0.0)]
 
-``Zones(zones="provinces").get_zone_geodataframe()`` dissolves mapped district
-geometries and records excluded zones and repairs in ``attrs``. These derived
-geometries exclude unmappable territories and do not represent official
-provincial boundaries. Lower-level province mappings retain strict validation
-unless ``unmapped="exclude"`` is explicitly supplied.
-
-Community detection
--------------------
-
-The optional Infomap adapter consumes the CSR network directly. It records
-the seed, algorithm version, options, node index, and a fingerprint of the
-matrix supplied to Infomap.
-
-.. code-block:: python
-
-   from pyspainmobility.network.integrations import run_infomap
-
-   partition = run_infomap(network, seed=123, num_trials=10)
-   print(partition.communities())
-
-Install ``pyspainmobility[infomap]`` for this example. For NetworkX algorithms
-or visualization, install ``pyspainmobility[network]`` and use
-:func:`~pyspainmobility.network.integrations.networkx.to_networkx`. Geographic
-node attributes are not attached to that graph automatically; join the zone
-geometries from :class:`~pyspainmobility.zones.zones.Zones` when needed.
+- ``NetworkSpec(self_loops="drop")`` excludes internal flows during construction.
+- ``symmetrize_network(network, method="sum")`` combines both directions into
+  one undirected connection. Other rules are ``mean``, ``max`` and ``mutual``;
+  their definitions are in :doc:`reference/network`.
+- :doc:`External algorithm adapters <reference/network_adapters>` connect these
+  results to NetworkX and Infomap. The graph algorithms and community detection
+  are supplied by those projects.
