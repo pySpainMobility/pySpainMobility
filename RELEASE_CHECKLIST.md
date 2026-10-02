@@ -39,8 +39,10 @@ Use this checklist for every release so pip and conda stay aligned.
     - Ensure repository Settings > Pages is configured to "GitHub Actions"
     - Confirm latest `documentation` workflow finished with deploy success
     - Open `https://pyspainmobility.github.io/pySpainMobility/`
+11. Publish a GitHub Release from the existing version tag:
+    - Use the changelog for release notes and attach the verified PyPI artifacts.
 
-## Release 2.1.2: manual publication
+## Release 2.1.2: published
 
 The pandas-input, empty-date-selection, CSR-validation and incomplete
 zone-metadata fixes are included in the artifacts in `dist/2.1.2/`.
@@ -60,20 +62,17 @@ zone-metadata fixes are included in the artifacts in `dist/2.1.2/`.
 - Wheel SHA-256: `5df8bf4375ee52b1d2ec093f9d3bfc7bd9758db4fdd8663dceca35351999dc4f`.
 - Conda-forge update: [PR #8](https://github.com/conda-forge/pyspainmobility-feedstock/pull/8).
 
-### PyPI and conda-forge
+### Publication status
 
-From the repository root, upload the verified artifacts using your PyPI token
-when Twine prompts for the password:
+Verified on 2026-10-02:
 
-```sh
-.venv/bin/python -m twine upload --username __token__ dist/2.1.2/*.whl dist/2.1.2/*.tar.gz
-```
-
-Keep the conda PR in draft until PyPI serves version 2.1.2 with the source hash
-above. Then mark it ready, rerun any failed source-download checks and merge
-after checks pass. Feedstock CI publishes the conda package automatically.
-If either artifact is rebuilt, repeat its verification and update the source
-SHA-256 in both recipes before uploading.
+- [PyPI 2.1.2](https://pypi.org/project/pyspainmobility/2.1.2/): wheel and source
+  archive published with the SHA-256 hashes recorded above.
+- [Conda-forge 2.1.2](https://anaconda.org/conda-forge/pyspainmobility): the
+  `noarch` package is published; feedstock PR #8 was merged on 2026-09-29.
+- [Documentation](https://pyspainmobility.github.io/pySpainMobility/): version 2.1.2.
+- [GitHub Release v2.1.2](https://github.com/pySpainMobility/pySpainMobility/releases/tag/v2.1.2):
+  release notes and the verified PyPI artifacts accompany the existing tag.
 
 ### Superseded artifacts
 
