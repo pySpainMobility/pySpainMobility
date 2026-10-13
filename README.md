@@ -180,6 +180,14 @@ isolated nodes. Each example explains its expected output.
 [NetworkX and Infomap adapters](https://pyspainmobility.github.io/pySpainMobility/reference/network_adapters.html)
 connect these results to algorithms supplied by those projects.
 
+### Paper use case
+
+The [paper notebooks](examples/paper/README.md) reproduce the income-stratified
+inter-province use case: data acquisition and district networks, geographic
+preparation, and the main/supplementary analyses. Run them in order with the
+dedicated environment described there. The notebooks include verified example
+outputs; downloaded data and generated files stay local.
+
 ## Backend selection
 
 The default `backend="auto"` uses Polars, with Arrow and pandas as runtime

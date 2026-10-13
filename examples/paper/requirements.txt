@@ -1,0 +1,15 @@
+# Python 3.11 is the tested notebook runtime.
+pyspainmobility[arrow]==2.1.2
+numpy>=1.26
+pandas>=2.0
+polars>=1.25,<2
+scipy>=1.11
+geopandas>=1.1.4,<1.2
+shapely>=2.0
+matplotlib>=3.9
+pyarrow>=8
+ipython>=8
+ipykernel>=6
+jupyterlab>=4
+nbformat>=5
+nbclient>=0.10
